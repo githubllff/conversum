@@ -3,7 +3,7 @@
 // @ts-ignore
 import { SQL_WASM_BASE64 } from './wasm-base64';
 import initSqlJs, { Database as SqlDatabase } from 'sql.js';
-import { isWholeBookReference } from './engine-wrapper'
+import { isWholeBookReference } from './engine-wrapper';
 import type ConversumPlugin from './main';
 import { ConversumData, ReferenceIndexEntry, FileCacheEntry } from './types';
 
@@ -32,26 +32,23 @@ export class IndexDatabase {
     async init(): Promise<void> {
         if (this.initialized) return;
         try {
-            // console.log('con[VER]sum: Initializing SQLite...'); // DEBUG
             const SQL = await initSqlJs({
-                locateFile: (file: string) => {
+                locateFile: () => {
                     return `data:application/wasm;base64,${SQL_WASM_BASE64}`;
                 }
             });
             let dbData: Uint8Array | null = null;
             try {
-                const configDir = this.plugin.app.vault.configDir;
                 const fileExists = await this.plugin.app.vault.adapter.exists(
-                    `${configDir}/plugins/conversum/${DB_NAME}`
+                    `.obsidian/plugins/conversum/${DB_NAME}`
                 );
                 if (fileExists) {
                     const fileContent = await this.plugin.app.vault.adapter.readBinary(
-                        `${configDir}/plugins/conversum/${DB_NAME}`
+                        `.obsidian/plugins/conversum/${DB_NAME}`
                     );
                     dbData = new Uint8Array(fileContent);
                 }
             } catch {
-                // console.log('con[VER]sum: No existing database file found, creating new one'); // DEBUG
             }
             this.db = dbData ? new SQL.Database(dbData) : new SQL.Database();
             this.db.run('PRAGMA foreign_keys = ON;');
@@ -59,7 +56,6 @@ export class IndexDatabase {
             this.cleanupOrphans();
             await this.loadDataFromDB();
             this.initialized = true;
-            // console.log('con[VER]sum: SQLite initialized'); // DEBUG
             await this.saveToDisk();
         } catch (e) {
             console.error('con[VER]sum: Failed to initialize SQLite:', e);
@@ -98,28 +94,16 @@ export class IndexDatabase {
             )
         `);
         this.db.run(`
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        `);
+            CREATE TABLE IF NOT EXISTS metadata (\n                key TEXT PRIMARY KEY,\n                value TEXT NOT NULL\n            )\n        `);
 
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_detail_book_chapter 
-            ON ref_detail (book_id, chapter)
-        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_detail_book_chapter \n            ON ref_detail (book_id, chapter)\n        `);
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_detail_start_verse 
-            ON ref_detail (start_verse)
-        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_detail_start_verse \n            ON ref_detail (start_verse)\n        `);
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_occ_range_key 
-            ON ref_occurrences (range_key)
-        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_occ_range_key \n            ON ref_occurrences (range_key)\n        `);
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_occ_file_path 
-            ON ref_occurrences (file_path)
-        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_occ_file_path \n            ON ref_occurrences (file_path)\n        `);
     }
 
     private async loadDataFromDB(): Promise<void> {
@@ -207,7 +191,7 @@ export class IndexDatabase {
                     data.occurrenceCounts.set(filePath, currentCount + 1);
                 }
 
-                for (const [, data] of refMap) {
+                for (const [rangeKey, data] of refMap) {
                     const files: {path: string, occurrences: number}[] = [];
                     let totalOccurrences = 0;
                     for (const [filePath, count] of data.occurrenceCounts) {
@@ -217,12 +201,11 @@ export class IndexDatabase {
                     files.sort((a, b) => a.path.localeCompare(b.path));
                     data.entry.files = files;
                     data.entry.totalOccurrences = totalOccurrences;
-                    this.data.references[data.entry.startBcv + '-' + data.entry.endBcv] = data.entry;
+                    this.data.references[rangeKey] = data.entry;
                     for (const filePath of data.filePaths) {
-                        const key = data.entry.startBcv + '-' + data.entry.endBcv;
                         if (this.data.fileCache[filePath]) {
-                            if (!this.data.fileCache[filePath].references.includes(key)) {
-                                this.data.fileCache[filePath].references.push(key);
+                            if (!this.data.fileCache[filePath].references.includes(rangeKey)) {
+                                this.data.fileCache[filePath].references.push(rangeKey);
                             }
                         }
                     }
@@ -234,7 +217,7 @@ export class IndexDatabase {
         }
     }
 
-    private async saveToDisk(): Promise<void> {
+    async saveToDisk(): Promise<void> {
         if (!this.db) return;
         try {
             this.db.run(
@@ -246,9 +229,8 @@ export class IndexDatabase {
                 ['lastUpdated', String(this.data.lastUpdated)]
             );
             const dbData = this.db.export();
-            const configDir = this.plugin.app.vault.configDir;
             await this.plugin.app.vault.adapter.writeBinary(
-                `${configDir}/plugins/conversum/${DB_NAME}`,
+                `.obsidian/plugins/conversum/${DB_NAME}`,
                 dbData as any
             );
         } catch (e) {
@@ -264,26 +246,26 @@ export class IndexDatabase {
     beginTransaction(): void {
         if (!this.db) return;
         if (this.inTransaction) {
-            console.warn('con[VER]sum: Transaction already in progress');
             return;
         }
         this.db.run('BEGIN TRANSACTION');
         this.inTransaction = true;
     }
 
-    async commitTransaction(): Promise<void> {
+    async commitTransaction(save: boolean = true): Promise<void> {
         if (!this.db) {
             this.inTransaction = false;
             return;
         }
         if (!this.inTransaction) {
-            console.warn('con[VER]sum: No transaction to commit');
             return;
         }
         try {
             this.db.run('COMMIT');
             this.inTransaction = false;
-            await this.saveToDisk();
+            if (save) {
+                await this.saveToDisk();
+            }
         } catch (e) {
             this.inTransaction = false;
             console.error('con[VER]sum: Failed to commit transaction:', e);
@@ -297,7 +279,6 @@ export class IndexDatabase {
             return;
         }
         if (!this.inTransaction) {
-            console.warn('con[VER]sum: No transaction to rollback');
             return;
         }
         try {
@@ -507,72 +488,66 @@ export class IndexDatabase {
         endChapter?: number
     ): void {
         if (!this.db) return;
-        if (!this.inTransaction) {
-            console.warn('con[VER]sum: insertOccurrence called outside transaction');
+        try {
+            this.db.run(`
+                INSERT OR IGNORE INTO ref_detail (
+                    range_key, start_bcv, end_bcv, book_id, chapter,
+                    start_verse, end_verse, end_chapter, formatted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            `, [
+                rangeKey,
+                startBcv,
+                endBcv,
+                bookId,
+                chapter,
+                startVerse,
+                endVerse,
+                endChapter || null
+            ]);
+            this.db.run(`
+                INSERT INTO ref_occurrences (range_key, file_path)
+                VALUES (?, ?)
+            `, [rangeKey, filePath]);
+        } catch (e) {
+            console.error(`con[VER]sum: Error inserting occurrence ${rangeKey}:`, e);
         }
-        const detailStmt = this.db.prepare(`
-            INSERT OR IGNORE INTO ref_detail (
-                range_key, start_bcv, end_bcv, book_id, chapter,
-                start_verse, end_verse, end_chapter, formatted
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-        `);
-        detailStmt.run([
-            rangeKey,
-            startBcv,
-            endBcv,
-            bookId,
-            chapter,
-            startVerse,
-            endVerse,
-            endChapter || null
-        ]);
-        detailStmt.free();
-        const occStmt = this.db.prepare(`
-            INSERT INTO ref_occurrences (range_key, file_path)
-            VALUES (?, ?)
-        `);
-        occStmt.run([rangeKey, filePath]);
-        occStmt.free();
     }
 
     upsertFileIndex(filePath: string, lastModified: number, language: string | null): void {
         if (!this.db) return;
-        if (!this.inTransaction) {
-            console.warn('con[VER]sum: upsertFileIndex called outside transaction');
+        try {
+            this.db.run(`
+                INSERT OR REPLACE INTO file_index (file_path, last_modified, language)
+                VALUES (?, ?, ?)
+            `, [filePath, lastModified, language || null]);
+        } catch (e) {
+            console.error(`con[VER]sum: Error upserting file index ${filePath}:`, e);
         }
-        const stmt = this.db.prepare(`
-            INSERT OR REPLACE INTO file_index (file_path, last_modified, language)
-            VALUES (?, ?, ?)
-        `);
-        stmt.run([filePath, lastModified, language || null]);
-        stmt.free();
     }
 
     deleteFileReferences(filePath: string): void {
         if (!this.db) return;
-        if (!this.inTransaction) {
-            console.warn('con[VER]sum: deleteFileReferences called outside transaction');
+        try {
+            this.db.run(`
+                DELETE FROM ref_occurrences WHERE file_path = ?
+            `, [filePath]);
+            this.cleanupOrphans();
+        } catch (e) {
+            console.error(`con[VER]sum: Error deleting file references ${filePath}:`, e);
         }
-        const stmt = this.db.prepare(`
-            DELETE FROM ref_occurrences WHERE file_path = ?
-        `);
-        stmt.run([filePath]);
-        stmt.free();
-        this.cleanupOrphans();
     }
 
     updateFormatted(rangeKey: string, formatted: string): void {
         if (!this.db) return;
-        if (!this.inTransaction) {
-            console.warn('con[VER]sum: updateFormatted called outside transaction');
+        try {
+            this.db.run(`
+                UPDATE ref_detail 
+                SET formatted = ? 
+                WHERE range_key = ?
+            `, [formatted, rangeKey]);
+        } catch (e) {
+            console.error(`con[VER]sum: Error updating formatted ${rangeKey}:`, e);
         }
-        const stmt = this.db.prepare(`
-            UPDATE ref_detail 
-            SET formatted = ? 
-            WHERE range_key = ?
-        `);
-        stmt.run([formatted, rangeKey]);
-        stmt.free();
     }
 
     cleanupOrphans(): void {
@@ -582,12 +557,10 @@ export class IndexDatabase {
             this.db.run('BEGIN TRANSACTION');
         }
         try {
-            const stmt = this.db.prepare(`
+            this.db.run(`
                 DELETE FROM ref_detail 
                 WHERE range_key NOT IN (SELECT DISTINCT range_key FROM ref_occurrences)
             `);
-            stmt.run([]);
-            stmt.free();
             if (!wasInTransaction) {
                 this.db.run('COMMIT');
             }
@@ -601,19 +574,20 @@ export class IndexDatabase {
 
     clearAllData(): void {
         if (!this.db) return;
-        if (!this.inTransaction) {
-            console.warn('con[VER]sum: clearAllData called outside transaction');
+        try {
+            this.db.run('DELETE FROM ref_occurrences');
+            this.db.run('DELETE FROM ref_detail');
+            this.db.run('DELETE FROM file_index');
+            this.db.run('DELETE FROM metadata');
+            this.data = {
+                version: this.data.version,
+                lastUpdated: 0,
+                references: {},
+                fileCache: {}
+            };
+        } catch (e) {
+            console.error('con[VER]sum: Error clearing all data:', e);
         }
-        this.db.run('DELETE FROM ref_occurrences');
-        this.db.run('DELETE FROM ref_detail');
-        this.db.run('DELETE FROM file_index');
-        this.db.run('DELETE FROM metadata');
-        this.data = {
-            version: this.data.version,
-            lastUpdated: 0,
-            references: {},
-            fileCache: {}
-        };
     }
 
     // ============================================================
@@ -694,7 +668,7 @@ export class IndexDatabase {
                 results.push([rangeKey, entry]);
             }
             return results;
-        } catch {
+        } catch (e) {
             return Object.entries(this.data.references);
         }
     }
@@ -778,7 +752,7 @@ export class IndexDatabase {
                 entry.totalOccurrences += count;
             }
 
-            for (const [rangeKey, data] of entryMap) {
+            for (const [, data] of entryMap) {
                 const { bookId, chapter, startBcv, endBcv, startVerse, endVerse, endChapter, formatted, files, totalOccurrences, displayChapter } = data;
 
                 const entry: ReferenceIndexEntry = {
@@ -796,10 +770,10 @@ export class IndexDatabase {
                 if (!bookMap.has(groupChapter)) {
                     bookMap.set(groupChapter, []);
                 }
-                bookMap.get(groupChapter)!.push([rangeKey, entry, formatted]);
+                bookMap.get(groupChapter)!.push([data.startBcv + '-' + data.endBcv, entry, formatted]);
             }
             return grouped;
-        } catch {
+        } catch (e) {
             return grouped;
         }
     }
@@ -883,22 +857,7 @@ export class IndexDatabase {
                 totalOccurrences
             };
             return entry;
-        } catch {
-            const startBook = parseInt(startBcv.substring(0, 2));
-            const startChapter = parseInt(startBcv.substring(2, 5));
-            const startVerse = parseInt(startBcv.substring(5, 8));
-            for (const [, entry] of Object.entries(this.data.references)) {
-                const entryStartBook = parseInt(entry.startBcv.substring(0, 2));
-                const entryStartChapter = parseInt(entry.startBcv.substring(2, 5));
-                const entryStartVerse = parseInt(entry.startBcv.substring(5, 8));
-                const entryEndVerse = parseInt(entry.endBcv.substring(5, 8));
-                if (entryStartBook === startBook && 
-                    entryStartChapter === startChapter && 
-                    startVerse >= entryStartVerse && 
-                    startVerse <= entryEndVerse) {
-                    return entry;
-                }
-            }
+        } catch (e) {
             return null;
         }
     }
@@ -941,18 +900,19 @@ export class IndexDatabase {
         if (this.db) {
             if (this.inTransaction) {
                 try {
-                    await this.commitTransaction();
-                } catch (e) {
-                    console.warn('con[VER]sum: Failed to commit transaction on close:', e);
+                    await this.commitTransaction(true);
+                } catch {
                     this.rollbackTransaction();
                 }
             }
-            this.db.run('VACUUM');
+            try {
+                this.db.run('VACUUM');
+            } catch {
+            }
             await this.saveToDisk();
             this.db.close();
             this.db = null;
             this.initialized = false;
-            // console.log('con[VER]sum: SQLite closed'); // DEBUG
         }
     }
 }

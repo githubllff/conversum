@@ -36,8 +36,8 @@ export class ScriptureIndexer {
     private isFormatting = false;
     private formattingAbortRequested = false;
     private formattingTimeout: number | null = null;
-    private formattingBatchSize = 50;
-    private formattingDelayMs = 200;
+    private formattingBatchSize = 100;
+    private formattingDelayMs = 150;
 
     constructor(
         vault: Vault,
@@ -208,7 +208,7 @@ export class ScriptureIndexer {
                 }
             }
         } catch (e) {
-            console.error('con[VER]sum: parseReferences error:', e);
+            void this.plugin.getLogger()?.error('parseReferences error on content snippet', e);
         }
         return result;
     }
@@ -274,6 +274,7 @@ export class ScriptureIndexer {
         const rangeKeys = this.db.getUnformattedRangeKeys(this.formattingBatchSize);
         if (rangeKeys.length === 0) {
             this.isFormatting = false;
+            await this.plugin.getLogger()?.log('Formatting completed');
             this.plugin.refreshConcordanceView();
             this.plugin.refreshSettings();
             return;
@@ -296,7 +297,8 @@ export class ScriptureIndexer {
                     );
                     const formatted = decoded && decoded.length > 0 ? decoded[0] : `${data.startBcv}-${data.endBcv}`;
                     this.db.updateFormatted(rangeKey, formatted);
-                } catch {
+                } catch (err) {
+                    void this.plugin.getLogger()?.error(`Error formatting rangeKey ${rangeKey}`, err);
                 }
             }
             if (!this.formattingAbortRequested) {
@@ -311,9 +313,10 @@ export class ScriptureIndexer {
             this.formattingTimeout = window.setTimeout(() => {
                 this.formatBatch();
             }, this.formattingDelayMs);
-        } catch {
+        } catch (e) {
             this.db.rollbackTransaction();
             this.isFormatting = false;
+            void this.plugin.getLogger()?.error('formatBatch transaction failed', e);
             this.plugin.refreshSettings();
         }
     }
@@ -328,7 +331,7 @@ export class ScriptureIndexer {
 
     async rebuildIndex(onProgress?: (progress: IndexProgress) => void): Promise<ConversumData> {
         if (this.isIndexing) {
-            console.warn('con[VER]sum: Indexing already in progress');
+            await this.plugin.getLogger()?.warn('Index rebuild requested while indexing already in progress');
             return this.data;
         }
         this.isIndexing = true;
@@ -348,6 +351,8 @@ export class ScriptureIndexer {
             this.progress.totalFiles = filteredFiles.length;
             this.progress.status = 'processing';
             onProgress?.(this.progress);
+            await this.plugin.getLogger()?.log(`Starting rebuild: ${filteredFiles.length} markdown files to process`);
+
             this.db.beginTransaction();
             try {
                 this.db.clearAllData();
@@ -359,23 +364,37 @@ export class ScriptureIndexer {
                 this.db.rollbackTransaction();
                 throw e;
             }
+
             this.db.beginTransaction();
             const referenceMap = new Map<string, ReferenceIndexEntry>();
             const fileCache: { [filePath: string]: FileCacheEntry } = {};
             const uniqueRefs = new Set<string>();
             let processedCount = 0;
+
             for (const file of filteredFiles) {
                 if (this.abortRequested) {
                     this.db.rollbackTransaction();
                     this.progress.status = 'idle';
                     this.isIndexing = false;
+                    await this.plugin.getLogger()?.warn('Index rebuild aborted by user');
                     return this.data;
                 }
                 this.progress.currentFile = file.path;
 
-                // Yield to the event loop periodically to prevent UI thread starvation
-                if (processedCount > 0 && processedCount % 25 === 0) {
+                // Yield to event loop frequently (every 10 files) to keep UI responsive
+                if (processedCount > 0 && processedCount % 10 === 0) {
                     await new Promise((resolve) => window.setTimeout(resolve, 0));
+                }
+
+                // Batch database transactions every 50 files to prevent unbounded memory growth
+                if (processedCount > 0 && processedCount % 50 === 0) {
+                    try {
+                        await this.db.commitTransaction(false);
+                        this.db.beginTransaction();
+                        await this.plugin.getLogger()?.log(`Progress: ${processedCount}/${filteredFiles.length} files (${this.progress.referencesFound} occurrences, ${uniqueRefs.size} unique refs)`);
+                    } catch (e) {
+                        await this.plugin.getLogger()?.error(`Checkpoint commit failed at file ${file.path}`, e);
+                    }
                 }
 
                 try {
@@ -434,13 +453,14 @@ export class ScriptureIndexer {
                         lastModified: file.stat.mtime
                     };
                 } catch (e) {
-                    console.error(`con[VER]sum: Error processing ${file.path}:`, e);
+                    await this.plugin.getLogger()?.error(`Error processing file ${file.path}`, e);
                 }
                 processedCount++;
                 this.progress.processedFiles = processedCount;
                 this.progress.uniqueReferences = uniqueRefs.size;
                 onProgress?.(this.progress);
             }
+
             const newData = this.getEmptyData();
             newData.references = Object.fromEntries(referenceMap);
             newData.fileCache = fileCache;
@@ -448,15 +468,20 @@ export class ScriptureIndexer {
             newData.version = this.pluginVersion;
             this.data = newData;
             this.db.setData(newData);
-            await this.db.commitTransaction();
+
+            await this.db.commitTransaction(true);
+
             this.db.beginTransaction();
             this.db.cleanupOrphans();
-            await this.db.commitTransaction();
+            await this.db.commitTransaction(true);
+
             try {
                 this.plugin.settings.rebuildStatus = 'complete';
                 await this.plugin.saveSettings();
             } catch {
             }
+
+            await this.plugin.getLogger()?.log(`Index rebuild complete: ${Object.keys(newData.references).length} unique references indexed`);
             this.progress.status = 'complete';
             this.progress.currentFile = undefined;
             onProgress?.(this.progress);
@@ -470,7 +495,7 @@ export class ScriptureIndexer {
             } catch {
             }
             this.progress.status = 'error';
-            console.error('con[VER]sum: Index rebuild failed:', e);
+            await this.plugin.getLogger()?.error('Index rebuild failed with critical exception', e);
             throw e;
         } finally {
             this.isIndexing = false;
@@ -589,7 +614,7 @@ export class ScriptureIndexer {
                 for (const key of cached.references) {
                     const entry = this.data.references[key];
                     if (entry) {
-                        const idx = entry.files.findIndex((f: { path: string }) => f.path === file.path);
+                        const idx = entry.files.findIndex((f: { path: string }) => f.path === filePath);
                         if (idx !== -1) {
                             entry.files.splice(idx, 1);
                             entry.totalOccurrences -= 1;
@@ -608,7 +633,7 @@ export class ScriptureIndexer {
             await this.db.commitTransaction();
         } catch (e) {
             this.db.rollbackTransaction();
-            console.error(`con[VER]sum: Failed to remove file ${filePath}:`, e);
+            void this.plugin.getLogger()?.error(`Failed to remove file ${filePath}`, e);
         }
     }
 

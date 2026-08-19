@@ -4,6 +4,7 @@ import { Plugin, Notice, Menu, TFile, TAbstractFile, Editor, EditorPosition, Mar
 import { IndexDatabase } from './database';
 import { initEngine, isEngineReady, getAvailableLanguages, parseReferences, getBookName, decodeScriptures, prewarmEngines, clearEnginePool } from './engine-wrapper';
 import { ScriptureIndexer } from './indexer';
+import { ConversumLogger } from './logger';
 import { RelatedNotesPopout } from './related';
 import { ConversumSettingTab } from './settings';
 import { ConcordanceView } from './sidebar';
@@ -13,6 +14,7 @@ export default class ConversumPlugin extends Plugin {
     settings!: ConversumSettings;
     indexer: ScriptureIndexer | null = null;
     private db: IndexDatabase | null = null;
+    private logger: ConversumLogger | null = null;
     private rebuildTimeout: number | null = null;
     private fileWatcherEnabled = false;
     private pendingFiles = new Set<TFile>();
@@ -24,13 +26,22 @@ export default class ConversumPlugin extends Plugin {
         return this.db;
     }
 
+    public getLogger(): ConversumLogger | null {
+        return this.logger;
+    }
+
     async onload(): Promise<void> {
+        this.logger = new ConversumLogger(this.app);
+        await this.logger.init();
+        await this.logger.log('Plugin initializing...');
+
         await this.loadSettings();
 
         try {
             await initEngine();
+            await this.logger.log('WASM Engine successfully initialized');
         } catch (e) {
-            console.error('con[VER]sum: Failed to initialize engine:', e);
+            await this.logger.error('Failed to initialize engine:', e);
             new Notice('con[VER]sum: Failed to initialize engine.');
         }
         prewarmEngines(this.settings.sourceLanguage, this.settings.outputLanguage);
@@ -57,6 +68,7 @@ export default class ConversumPlugin extends Plugin {
             this.startFileWatcher();
         }
         this.isStartupComplete = true;
+        await this.logger.log('Plugin loaded and ready');
     }
 
     async onunload(): Promise<void> {
@@ -74,6 +86,7 @@ export default class ConversumPlugin extends Plugin {
             await this.db.close();
             this.db = null;
         }
+        await this.logger?.log('Plugin unloaded');
     }
 
     private transformForcedReferences(text: string): string {
@@ -108,6 +121,7 @@ export default class ConversumPlugin extends Plugin {
         const rebuildStatus = this.settings.rebuildStatus || 'unknown';
 
         if (rebuildStatus === 'in_progress' || rebuildStatus === 'failed' || rebuildStatus === 'aborted') {
+            await this.logger?.warn(`Previous index rebuild state: ${rebuildStatus}. Triggering recovery rebuild.`);
             new Notice('Previous index rebuild was incomplete. Rebuilding...');
             this.settings.rebuildStatus = 'in_progress';
             await this.saveSettings();
@@ -172,10 +186,12 @@ export default class ConversumPlugin extends Plugin {
         }
 
         if (filesToIndex.length > 0) {
+            await this.logger?.log(`Startup sync: indexing ${filesToIndex.length} changed files`);
             for (const file of filesToIndex) {
                 try {
                     await this.indexer.updateFile(file, true);
-                } catch {
+                } catch (e) {
+                    await this.logger?.error(`Startup sync failed on ${file.path}`, e);
                 }
             }
         }
@@ -262,7 +278,7 @@ export default class ConversumPlugin extends Plugin {
             this.indexer.updateSettings(
                 this.settings.sourceLanguage,
                 this.settings.outputLanguage,
-                this.settings.nameFormat,
+                this.nameFormat = this.settings.nameFormat,
                 this.settings.excludedFolders
             );
         }
@@ -302,8 +318,9 @@ export default class ConversumPlugin extends Plugin {
             this.refreshConcordanceView();
             this.refreshSettings();
 
-        } catch {
-            notice.setMessage('Index rebuild failed. See console for details.');
+        } catch (e) {
+            await this.logger?.error('Manual rebuild failed', e);
+            notice.setMessage('Index rebuild failed. See conversum.log for details.');
             setTimeout(() => notice.hide(), 3000);
         }
     }
@@ -367,7 +384,7 @@ export default class ConversumPlugin extends Plugin {
                 try {
                     await this.indexer.updateFile(f, true);
                 } catch (e) {
-                    console.error(`con[VER]sum: Failed to update file ${f.path}:`, e);
+                    await this.logger?.error(`Failed to update file ${f.path}`, e);
                 }
             }
             this.indexer.startBackgroundFormatting();
@@ -921,8 +938,9 @@ export default class ConversumPlugin extends Plugin {
             const file = await this.app.vault.create(filePath, content);
             await this.app.workspace.openLinkText(file.path, '');
             new Notice(`Concordance exported: ${fileName}`);
-        } catch {
-            new Notice('Export failed. See console for details.');
+        } catch (e) {
+            await this.logger?.error('Export concordance failed', e);
+            new Notice('Export failed. See console or log for details.');
         }
     }
 
@@ -984,8 +1002,8 @@ export default class ConversumPlugin extends Plugin {
                     .sort((a, b) => a.path.localeCompare(b.path));
                 const fileEntries: string[] = [];
                 for (const file of sortedFiles) {
-                    const fileName = file.path.replace(/\.md$/, '');
-                    fileEntries.push(`[[${fileName}]]\u2009(${file.occurrences})`);
+                    const fileName = file.path.replace(/\\.md$/, '');
+                    fileEntries.push(`[[${fileName}]]\\u2009(${file.occurrences})`);
                 }
                 lines.push(`**${formattedRef}** — ${fileEntries.join('; ')}`);
             }
@@ -994,7 +1012,7 @@ export default class ConversumPlugin extends Plugin {
         }
         lines.push('---');
         lines.push('');
-        lines.push(`*Generated by \`con[VER]sum v${this.manifest.version}\`*`);
-        return lines.join('\n');
+        lines.push(`*Generated by \\`con[VER]sum v${this.manifest.version}\\`*`);
+        return lines.join('\\n');
     }
 }
