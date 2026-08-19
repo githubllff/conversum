@@ -2,7 +2,7 @@
 
 import type { Vault, TFile } from 'obsidian';
 import { IndexDatabase } from './database';
-import { parseReferences, isEngineReady, decodeScriptures, resolveLanguage } from './engine';
+import { parseReferences, isEngineReady, decodeScriptures, resolveLanguage } from './engine-wrapper';
 import type ConversumPlugin from './main';
 import { ReferenceIndexEntry, FileCacheEntry, IndexProgress, ConversumData } from './types';
 
@@ -589,7 +589,7 @@ export class ScriptureIndexer {
                 for (const key of cached.references) {
                     const entry = this.data.references[key];
                     if (entry) {
-                        const idx = entry.files.findIndex((f: { path: string }) => f.path === filePath);
+                        const idx = entry.files.findIndex((f: { path: string }) => f.path === file.path);
                         if (idx !== -1) {
                             entry.files.splice(idx, 1);
                             entry.totalOccurrences -= 1;
