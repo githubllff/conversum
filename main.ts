@@ -2,7 +2,7 @@
 
 import { Plugin, Notice, Menu, TFile, TAbstractFile, Editor, EditorPosition, MarkdownView } from 'obsidian';
 import { IndexDatabase } from './database';
-import { initEngine, isEngineReady, getAvailableLanguages, parseReferences, getBookName, decodeScriptures, prewarmEngines, clearEnginePool } from './engine-wrapper';
+import { initEngine, isEngineReady, getAvailableLanguages, parseReferences, getBookName, decodeScriptures, prewarmEngines, clearEnginePool } from './engine';
 import { ScriptureIndexer } from './indexer';
 import { RelatedNotesPopout } from './related';
 import { ConversumSettingTab } from './settings';
@@ -15,6 +15,7 @@ export default class ConversumPlugin extends Plugin {
     private db: IndexDatabase | null = null;
     private rebuildTimeout: number | null = null;
     private fileWatcherEnabled = false;
+    private pendingFiles = new Set<TFile>();
     private relatedPopout: RelatedNotesPopout | null = null;
     private isStartupComplete = false;
     public settingsTab: ConversumSettingTab | null = null;
@@ -28,7 +29,6 @@ export default class ConversumPlugin extends Plugin {
 
         try {
             await initEngine();
-            // console.log('con[VER]sum: Engine initialized'); // DEBUG
         } catch (e) {
             console.error('con[VER]sum: Failed to initialize engine:', e);
             new Notice('con[VER]sum: Failed to initialize engine.');
@@ -48,7 +48,7 @@ export default class ConversumPlugin extends Plugin {
         this.addCommands();
         this.registerEvents();
         this.addRibbonIcon('book-open', 'con[VER]sum Concordance', () => {
-            void this.openConcordanceView();
+            this.openConcordanceView();
         });
 
         await this.handleStartup();
@@ -57,13 +57,12 @@ export default class ConversumPlugin extends Plugin {
             this.startFileWatcher();
         }
         this.isStartupComplete = true;
-        // console.log('con[VER]sum: Plugin loaded'); // DEBUG
     }
 
-    onunload(): void {
+    async onunload(): Promise<void> {
         this.stopFileWatcher();
         if (this.rebuildTimeout) {
-            window.clearTimeout(this.rebuildTimeout);
+            clearTimeout(this.rebuildTimeout);
             this.rebuildTimeout = null;
         }
         if (this.relatedPopout) {
@@ -72,11 +71,9 @@ export default class ConversumPlugin extends Plugin {
         }
         clearEnginePool();
         if (this.db) {
-            void this.db.close().then(() => {
-                this.db = null;
-            });
+            await this.db.close();
+            this.db = null;
         }
-        // console.log('con[VER]sum: Plugin unloaded'); // DEBUG
     }
 
     private transformForcedReferences(text: string): string {
@@ -115,14 +112,13 @@ export default class ConversumPlugin extends Plugin {
             this.settings.rebuildStatus = 'in_progress';
             await this.saveSettings();
             this.app.workspace.onLayoutReady(async () => {
-                await new Promise(resolve => window.setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 500));
                 await this.syncIndexOnStartup();
             });
             return;
         }
 
         if (hasValidData && this.settings.autoIndex) {
-            // console.log(`con[VER]sum: Loaded index with ${Object.keys(data.references).length} references from SQLite`); // DEBUG
             this.app.workspace.onLayoutReady(async () => {
                 await this.syncIndexOnStartup();
             });
@@ -136,7 +132,6 @@ export default class ConversumPlugin extends Plugin {
         }
 
         if (!hasValidData && this.settings.autoIndex) {
-            // console.log('con[VER]sum: No index data found, rebuilding...'); // DEBUG
             this.app.workspace.onLayoutReady(async () => {
                 await this.rebuildIndex();
             });
@@ -144,7 +139,6 @@ export default class ConversumPlugin extends Plugin {
         }
 
         if (!hasValidData && !this.settings.autoIndex) {
-            // console.log('con[VER]sum: No index data found and auto-index is disabled. Waiting for user action.'); // DEBUG
             this.refreshConcordanceView();
             this.refreshSettings();
             return;
@@ -153,15 +147,12 @@ export default class ConversumPlugin extends Plugin {
 
     private async syncIndexOnStartup(): Promise<void> {
         if (!this.indexer || !this.db) {
-            // console.log('con[VER]sum: Indexer or database not initialized, skipping sync'); // DEBUG
             return;
         }
 
-        // console.log('con[VER]sum: Syncing index on startup...'); // DEBUG
         const allFiles = this.app.vault.getMarkdownFiles();
         const data = this.db.getData();
         if (!data || Object.keys(data.fileCache).length === 0) {
-            // console.log('con[VER]sum: No existing index data, rebuilding...'); // DEBUG
             await this.rebuildIndex();
             return;
         }
@@ -181,39 +172,25 @@ export default class ConversumPlugin extends Plugin {
         }
 
         if (filesToIndex.length > 0) {
-            // console.log(`con[VER]sum: Indexing ${filesToIndex.length} new/changed files...`); // DEBUG
-            // let indexedCount = 0; // DEBUG
             for (const file of filesToIndex) {
                 try {
                     await this.indexer.updateFile(file, true);
-                    // indexedCount++; // DEBUG
                 } catch {
                 }
             }
-            // console.log(`con[VER]sum: Indexed ${indexedCount} files`); // DEBUG
         }
 
-        // console.log('con[VER]sum: Checking for deleted files...'); // DEBUG
         const freshData = this.db.getData();
         const freshFileCache = freshData.fileCache || {};
-        let removedCount = 0;
         for (const cachedPath of Object.keys(freshFileCache)) {
             if (!vaultPaths.has(cachedPath)) {
                 await this.indexer.removeFile(cachedPath);
-                removedCount++;
             }
-        }
-
-        if (removedCount > 0) {
-            // console.log(`con[VER]sum: Removed ${removedCount} deleted files from index`); // DEBUG
         }
 
         const unformattedCount = this.db.getUnformattedCount();
         if (unformattedCount > 0) {
-            // console.log(`con[VER]sum: ${unformattedCount} references need formatting, starting background process...`); // DEBUG
             this.indexer.startBackgroundFormatting();
-        } else {
-            // console.log('con[VER]sum: All references formatted'); // DEBUG
         }
 
         this.refreshConcordanceView();
@@ -321,13 +298,13 @@ export default class ConversumPlugin extends Plugin {
             await this.indexer.rebuildIndex(progressCallback);
             const data = this.indexer.getData();
             notice.setMessage(`Index complete: ${data ? Object.keys(data.references).length : 0} unique references`);
-            window.setTimeout(() => notice.hide(), 2000);
+            setTimeout(() => notice.hide(), 2000);
             this.refreshConcordanceView();
             this.refreshSettings();
 
         } catch {
             notice.setMessage('Index rebuild failed. See console for details.');
-            window.setTimeout(() => notice.hide(), 3000);
+            setTimeout(() => notice.hide(), 3000);
         }
     }
 
@@ -338,687 +315,4 @@ export default class ConversumPlugin extends Plugin {
             this.settings.outputLanguage,
             this.settings.nameFormat
         );
-        return decoded && decoded.length > 0 && decoded[0] ? decoded[0] : `${entry.startBcv}-${entry.endBcv}`;
-    }
-
-    public async reformatAllReferences(): Promise<void> {
-        if (!this.indexer) return;
-        const data = this.indexer.getData();
-        if (!data || Object.keys(data.references).length === 0) return;
-        await this.indexer.clearFormatted();
-        this.indexer.startBackgroundFormatting();
-        this.refreshConcordanceView();
-        this.refreshSettings();
-    }
-
-    // ============================================================
-    // FILE WATCHER
-    // ============================================================
-
-    startFileWatcher(): void {
-        if (this.fileWatcherEnabled) return;
-        this.fileWatcherEnabled = true;
-    }
-
-    stopFileWatcher(): void {
-        this.fileWatcherEnabled = false;
-        if (this.rebuildTimeout) {
-            window.clearTimeout(this.rebuildTimeout);
-            this.rebuildTimeout = null;
-        }
-    }
-
-    private scheduleIndexUpdate(file: TFile): void {
-        if (!this.settings.autoIndex || !this.fileWatcherEnabled) return;
-        if (!this.indexer) return;
-        if (this.indexer.isIndexingBusy()) return;
-
-        for (const folder of this.settings.excludedFolders) {
-            if (file.path.startsWith(folder + '/') || file.path === folder) {
-                return;
-            }
-        }
-
-        if (this.rebuildTimeout) {
-            window.clearTimeout(this.rebuildTimeout);
-        }
-
-        this.rebuildTimeout = window.setTimeout(async () => {
-            this.rebuildTimeout = null;
-            if (!this.indexer || this.indexer.isIndexingBusy()) return;
-            try {
-                await this.indexer.updateFile(file);
-                this.refreshConcordanceView();
-                this.refreshSettings();
-            } catch {
-            }
-        }, 5000);
-    }
-
-    // ============================================================
-    // EVENTS
-    // ============================================================
-
-    private registerEvents(): void {
-        this.registerEvent(
-            this.app.vault.on('modify', (file: TAbstractFile) => {
-                if (file instanceof TFile && file.extension === 'md') {
-                    this.scheduleIndexUpdate(file);
-                }
-            })
-        );
-
-        this.registerEvent(
-            this.app.vault.on('create', (file: TAbstractFile) => {
-                if (file instanceof TFile && file.extension === 'md') {
-                    if (this.app.workspace.layoutReady) {
-                        this.scheduleIndexUpdate(file);
-                    }
-                }
-            })
-        );
-
-        this.registerEvent(
-            this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
-                if (file instanceof TFile && file.extension === 'md') {
-                    if (this.indexer && this.isStartupComplete) {
-                        void this.indexer.removeFile(oldPath);
-                        this.scheduleIndexUpdate(file);
-                    }
-                }
-            })
-        );
-
-        this.registerEvent(
-            this.app.vault.on('delete', (file: TAbstractFile) => {
-                if (file instanceof TFile && file.extension === 'md') {
-                    if (this.indexer && this.isStartupComplete) {
-                        void this.indexer.removeFile(file.path);
-                        this.refreshConcordanceView();
-                        this.refreshSettings();
-                    }
-                }
-            })
-        );
-
-        // Context menu - editor mode
-        this.registerEvent(
-            this.app.workspace.on('editor-menu', (menu, editor) => {
-                const cursor = editor.getCursor();
-                const line = editor.getLine(cursor.line);
-                let hasReference = false;
-                let matchedEntry: any = null;
-
-                if (isEngineReady()) {
-                    const activeFile = this.app.workspace.getActiveFile();
-                    const sourceLang = this.getEffectiveSourceLanguage(activeFile);
-                    const processedLine = this.transformForcedReferences(line);
-                    const parsed = parseReferences(
-                        processedLine,
-                        sourceLang,
-                        this.settings.outputLanguage,
-                        this.settings.nameFormat
-                    );
-
-                    if (parsed && parsed.length > 0) {
-                        const cursorCh = cursor.ch;
-                        const isForced = line.includes('{{') && line.includes('}}');
-                        for (const entry of parsed) {
-                            let startPos = entry[1] as number;
-                            let endPos = entry[2] as number;
-                            if (isForced) {
-                                startPos += 2;
-                                endPos += 2;
-                            }
-                            if (cursorCh >= startPos && cursorCh < endPos) {
-                                hasReference = true;
-                                matchedEntry = entry;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                menu.addItem((item: any) => {
-                    item.setTitle('con[VER]sum').setIcon('book-open');
-                    const submenu = item.setSubmenu();
-                    submenu.addItem((subItem: any) => {
-                        subItem.setTitle('Open concordance').setIcon('book-open');
-                        subItem.onClick(() => {
-                            void this.openConcordanceView();
-                        });
-                    });
-                    if (hasReference && matchedEntry) {
-                        submenu.addItem((subItem: any) => {
-                            subItem.setTitle('Find related notes').setIcon('link');
-                            subItem.onClick(() => {
-                                this.showRelatedNotesFromParsed([matchedEntry]);
-                            });
-                        });
-                    }
-                });
-            })
-        );
-
-        // Context menu - reading mode
-        this.registerDomEvent(activeDocument, 'contextmenu', (evt: MouseEvent) => {
-            const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-            if (!view || view.getMode() !== 'preview') return;
-            const activeFile = this.app.workspace.getActiveFile();
-            const sourceLang = this.getEffectiveSourceLanguage(activeFile);
-            let parsed: any[] | null = null;
-            const selection = activeDocument.getSelection()?.toString() || '';
-            if (selection) {
-                const processedText = this.transformForcedReferences(selection);
-                parsed = parseReferences(processedText, sourceLang, this.settings.outputLanguage, this.settings.nameFormat);
-                if (parsed && parsed.length > 0) {
-                    this.showReadingModeMenu(evt, parsed);
-                    return;
-                }
-            }
-            const element = activeDocument.elementFromPoint(evt.clientX, evt.clientY);
-            if (!element) {
-                this.showReadingModeMenu(evt, null);
-                return;
-            }
-            const position = activeDocument.caretPositionFromPoint(evt.clientX, evt.clientY);
-            let isAtEnd = false;
-            if (position) {
-                const container = position.offsetNode;
-                const offset = position.offset;
-                if (container && container.nodeType === Node.TEXT_NODE) {
-                    const textNode = container as Text;
-                    const text = textNode.textContent || '';
-                    if (offset >= text.length) {
-                        let nextSibling = textNode.nextSibling;
-                        let hasTextAfter = false;
-                        while (nextSibling) {
-                            if (nextSibling.nodeType === Node.TEXT_NODE) {
-                                const siblingText = (nextSibling as Text).textContent || '';
-                                if (siblingText.trim().length > 0) {
-                                    hasTextAfter = true;
-                                    break;
-                                }
-                            } else if (nextSibling.nodeType === Node.ELEMENT_NODE) {
-                                const elementText = (nextSibling as Element).textContent || '';
-                                if (elementText.trim().length > 0) {
-                                    hasTextAfter = true;
-                                    break;
-                                }
-                            }
-                            nextSibling = nextSibling.nextSibling;
-                        }
-                        if (!hasTextAfter) {
-                            isAtEnd = true;
-                        }
-                    }
-                }
-            }
-            if (isAtEnd) {
-                this.showReadingModeMenu(evt, null);
-                return;
-            }
-            let textToParse = '';
-            const linkEl = element.closest('a');
-            if (linkEl) {
-                const dataBcv = linkEl.getAttribute('data-bcv');
-                const linkText = linkEl.textContent || '';
-                if (dataBcv) {
-                    const displayText = linkEl.textContent || '';
-                    const rangeKey = `${dataBcv}-${dataBcv}`;
-                    const entry = this.indexer?.getReference(rangeKey);
-                    if (entry) {
-                        const refData = [[displayText, 0, displayText.length, [[dataBcv, dataBcv]]]];
-                        this.showReadingModeMenu(evt, refData as any[]);
-                    } else {
-                        this.showReadingModeMenu(evt, null);
-                    }
-                    return;
-                }
-                const parent = linkEl.parentElement;
-                if (parent) {
-                    const parentText = parent.textContent || '';
-                    const forceMatch = parentText.match(/\{\{(.+?)\}\}/);
-                    if (forceMatch) {
-                        textToParse = forceMatch[0];
-                    } else {
-                        textToParse = linkText;
-                    }
-                } else {
-                    textToParse = linkText;
-                }
-            } else {
-                if (position) {
-                    const container = position.offsetNode;
-                    if (container && container.nodeType === Node.TEXT_NODE) {
-                        const textNode = container as Text;
-                        const fullText = textNode.textContent || '';
-                        const forceMatch = fullText.match(/\{\{(.+?)\}\}/);
-                        if (forceMatch) {
-                            textToParse = forceMatch[0];
-                        } else {
-                            textToParse = fullText;
-                        }
-                    }
-                }
-            }
-            if (textToParse && !textToParse.includes('{{')) {
-                const clickedText = textToParse.trim();
-                if (clickedText.length === 0) {
-                    const parentElement = element.closest('p, div, span, a');
-                    if (parentElement) {
-                        const fullText = parentElement.textContent || '';
-                        const forceMatch = fullText.match(/\{\{(.+?)\}\}/);
-                        if (forceMatch) {
-                            textToParse = forceMatch[0];
-                        }
-                    }
-                }
-            }
-            if (textToParse) {
-                const processedText = this.transformForcedReferences(textToParse);
-                const parsedResult = parseReferences(processedText, sourceLang, this.settings.outputLanguage, this.settings.nameFormat);
-                if (parsedResult && parsedResult.length > 0) {
-                    const refText = parsedResult[0][0] as string;
-                    const contextText = element.textContent || '';
-                    const parentText = element.parentElement?.textContent || '';
-                    const fullContext = parentText || contextText;
-                    if (fullContext.includes(refText) || textToParse.includes(refText)) {
-                        parsed = parsedResult;
-                    }
-                }
-            }
-            this.showReadingModeMenu(evt, parsed);
-        });
-    }
-
-    private showReadingModeMenu(evt: MouseEvent, parsed: any[] | null): void {
-        evt.preventDefault();
-        evt.stopPropagation();
-        const menu = new Menu();
-        menu.addItem((item: any) => {
-            item.setTitle('con[VER]sum').setIcon('book-open');
-            const submenu = item.setSubmenu();
-            submenu.addItem((subItem: any) => {
-                subItem.setTitle('Open concordance').setIcon('book-open');
-                subItem.onClick(() => {
-                    void this.openConcordanceView();
-                });
-            });
-            if (parsed && parsed.length > 0) {
-                const position = activeDocument.caretPositionFromPoint(evt.clientX, evt.clientY);
-                let isOnRef = false;
-                if (position) {
-                    const node = position.offsetNode;
-                    const offset = position.offset;
-                    if (node && node.nodeType === Node.TEXT_NODE) {
-                        const text = (node as Text).textContent || '';
-                        const refText = parsed[0][0] as string;
-                        const cleanText = text.replace(/\{\{|\}\}/g, '');
-                        if (cleanText.includes(refText)) {
-                            const startIdx = cleanText.indexOf(refText);
-                            const endIdx = startIdx + refText.length;
-                            const beforeRef = text.substring(0, text.indexOf(refText));
-                            const markerOffset = (beforeRef.match(/\{\{/g) || []).length * 2;
-                            const cleanOffset = offset - markerOffset;
-                            if (cleanOffset >= startIdx && cleanOffset < endIdx) {
-                                isOnRef = true;
-                            }
-                        }
-                    } else if (node && node.nodeType === Node.ELEMENT_NODE) {
-                        const parent = node as Element;
-                        const text = parent.textContent || '';
-                        const refText = parsed[0][0] as string;
-                        if (text.includes(refText)) {
-                            isOnRef = true;
-                        }
-                    }
-                }
-                if (isOnRef) {
-                    submenu.addItem((subItem: any) => {
-                        subItem.setTitle('Find related notes').setIcon('link');
-                        subItem.onClick(() => {
-                            this.showRelatedNotesFromParsed(parsed);
-                        });
-                    });
-                }
-            }
-        });
-        menu.showAtPosition({ x: evt.clientX, y: evt.clientY - 70 });
-    }
-
-    // ============================================================
-    // COMMANDS
-    // ============================================================
-
-    private addCommands(): void {
-        this.addCommand({
-            id: 'find-related-notes',
-            name: 'Find related notes',
-            icon: 'link',
-            editorCallback: (editor: Editor) => {
-                const cursor = editor.getCursor();
-                const line = editor.getLine(cursor.line);
-                this.findRelatedNotesAtCursor(editor, cursor, line);
-            }
-        });
-        this.addCommand({
-            id: 'open-concordance',
-            name: 'Open concordance',
-            icon: 'book-open',
-            callback: () => void this.openConcordanceView()
-        });
-    }
-
-    // ============================================================
-    // VIEW MANAGEMENT
-    // ============================================================
-
-    async openConcordanceView(): Promise<void> {
-        const { workspace } = this.app;
-        let leaf = workspace.getLeavesOfType(VIEW_TYPE_CONVERSUM_CONCORDANCE)[0];
-        if (!leaf) {
-            const rightLeaf = workspace.getRightLeaf(false);
-            if (!rightLeaf) {
-                new Notice('Could not create view');
-                return;
-            }
-            await rightLeaf.setViewState({
-                type: VIEW_TYPE_CONVERSUM_CONCORDANCE,
-                active: true
-            });
-            leaf = rightLeaf;
-        }
-        await workspace.revealLeaf(leaf);
-    }
-
-    public refreshConcordanceView(): void {
-        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CONVERSUM_CONCORDANCE);
-        for (const leaf of leaves) {
-            const view = leaf.view as ConcordanceView;
-            if (view && typeof view.refresh === 'function') {
-                view.refresh();
-            }
-        }
-    }
-
-    public refreshSettings(): void {
-        if (this.settingsTab) {
-            if (this.settingsTab.containerEl && this.settingsTab.containerEl.children.length > 0) {
-                this.settingsTab.display();
-                return;
-            }
-        }
-        const settingTabs = (this.app as any).setting?.tabContainer?.children;
-        if (settingTabs) {
-            for (const child of settingTabs) {
-                if (child.textContent?.includes('con[VER]sum')) {
-                    const tab = child;
-                    if (tab && typeof tab.display === 'function') {
-                        tab.display();
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    // ============================================================
-    // EFFECTIVE SOURCE LANGUAGE
-    // ============================================================
-
-    private getEffectiveSourceLanguage(file: TFile | null): string {
-        if (!file || !this.db) return this.settings.sourceLanguage;
-        const language = this.db.getFileLanguage(file.path);
-        return language || this.settings.sourceLanguage;
-    }
-
-    // ============================================================
-    // FIND REFERENCE AT CURSOR
-    // ============================================================
-
-    private findReferenceAtPosition(line: string, position: number, sourceLang: string): { text: string; startBcv: string; endBcv: string } | null {
-        if (!isEngineReady()) return null;
-        const processedLine = this.transformForcedReferences(line);
-        const parsed = parseReferences(
-            processedLine,
-            sourceLang,
-            this.settings.outputLanguage,
-            this.settings.nameFormat
-        );
-        if (!parsed || parsed.length === 0) {
-            return null;
-        }
-        for (const entry of parsed) {
-            const startPos = entry[1] as number;
-            const endPos = entry[2] as number;
-            const matchedText = entry[0] as string;
-            const ranges = entry[3] as string[][];
-            if (position >= startPos && position < endPos) {
-                if (ranges && ranges.length > 0) {
-                    return {
-                        text: matchedText,
-                        startBcv: ranges[0][0],
-                        endBcv: ranges[0][1]
-                    };
-                }
-            }
-        }
-        return null;
-    }
-
-    private showRelatedNotesFromParsed(parsed: any[], evt?: MouseEvent): void {
-        if (!parsed || parsed.length === 0) {
-            const activeFile = this.app.workspace.getActiveFile();
-            const sourceLang = this.getEffectiveSourceLanguage(activeFile);
-            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;
-            new Notice(`No scripture reference found in ${langName}`);
-            return;
-        }
-        
-        const ranges = parsed[0][3] as string[][];
-        if (!ranges || ranges.length === 0) {
-            const activeFile = this.app.workspace.getActiveFile();
-            const sourceLang = this.getEffectiveSourceLanguage(activeFile);
-            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;
-            new Notice(`No valid reference found in ${langName}`);
-            return;
-        }
-
-        const startBcv = ranges[0][0];
-        const endBcv = ranges[0][1];
-        if (!startBcv || startBcv.length < 8) {
-            const activeFile = this.app.workspace.getActiveFile();
-            const sourceLang = this.getEffectiveSourceLanguage(activeFile);
-            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;
-            new Notice(`Invalid reference format in ${langName}`);
-            return;
-        }
-
-        const matchingEntries = this.indexer?.findReferencesContainingRange(startBcv, endBcv) || [];
-        if (matchingEntries.length === 0) {
-            const activeFile = this.app.workspace.getActiveFile();
-            const sourceLang = this.getEffectiveSourceLanguage(activeFile);
-            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;
-            new Notice(`No notes found for this reference in ${langName}`);
-            return;
-        }
-
-        const firstEntry = matchingEntries[0][1];
-        const formatted = this.formatReferenceOnTheFly(firstEntry);
-        if (evt) {
-            this.relatedPopout?.showWithEntries(startBcv, formatted, matchingEntries, evt.clientX, evt.clientY);
-        } else {
-            this.relatedPopout?.showWithEntries(startBcv, formatted, matchingEntries, window.innerWidth / 2 - 150, window.innerHeight / 2 - 100);
-        }
-    }
-
-    private findRelatedNotesAtCursor(editor: Editor, cursor: EditorPosition, line: string): void {
-        if (!isEngineReady()) {
-            new Notice('Engine not ready');
-            return;
-        }
-        if (!this.indexer) {
-            new Notice('Indexer not initialized');
-            return;
-        }
-
-        const activeFile = this.app.workspace.getActiveFile();
-        const sourceLang = this.getEffectiveSourceLanguage(activeFile);
-        const result = this.findReferenceAtPosition(line, cursor.ch, sourceLang);
-        if (!result) {
-            const wordMatch = line.substring(0, cursor.ch).match(/\S+$/);
-            const nextWordMatch = line.substring(cursor.ch).match(/^\S+/);
-            const word = wordMatch ? wordMatch[0] : (nextWordMatch ? nextWordMatch[0] : null);
-            if (word) {
-                new Notice(`"${word}" is not a scripture reference`);
-            } else {
-                new Notice('No scripture reference found at cursor');
-            }
-            return;
-        }
-
-        const { text: reference, startBcv, endBcv } = result;
-        if (!startBcv || startBcv.length < 8) {
-            new Notice('Invalid reference format');
-            return;
-        }
-        const matchingEntries = this.indexer.findReferencesContainingRange(startBcv, endBcv);
-        if (matchingEntries.length === 0) {
-            const langName = getAvailableLanguages().find(l => l.code === sourceLang)?.vernacularName || sourceLang;
-            new Notice(`No notes found for "${reference}" in ${langName}`);
-            return;
-        }
-
-        const firstEntry = matchingEntries[0][1];
-        const formatted = this.formatReferenceOnTheFly(firstEntry);
-        let x = 0, y = 0;
-        try {
-            const editorView = (editor as any).cm?.view || (editor as any).cm;
-            if (editorView && typeof editorView.coordsAtPos === 'function') {
-                const pos = editorView.posAtCoords({ line: cursor.line, ch: cursor.ch });
-                if (pos !== null && pos !== undefined) {
-                    const coords = editorView.coordsAtPos(pos);
-                    if (coords) {
-                        x = coords.left || 0;
-                        y = (coords.top || 0) + 25;
-                    }
-                }
-            }
-        } catch {
-        }
-
-        if (x === 0 && y === 0) {
-            const activeEl = activeDocument.activeElement;
-            if (activeEl) {
-                const rect = activeEl.getBoundingClientRect();
-                x = rect.left + 20;
-                y = rect.top + 40;
-            }
-        }
-        if (x === 0 && y === 0) {
-            x = window.innerWidth / 2 - 150;
-            y = window.innerHeight / 2 - 100;
-        }
-        this.relatedPopout?.showWithEntries(startBcv, formatted, matchingEntries, x, y);
-    }
-
-    // ============================================================
-    // EXPORT
-    // ============================================================
-
-    async exportConcordance(): Promise<void> {
-        if (!this.indexer) {
-            new Notice('Indexer not initialized');
-            return;
-        }
-        const data = this.indexer.getData();
-        if (!data || Object.keys(data.references).length === 0) {
-            new Notice('No references to export');
-            return;
-        }
-        try {
-            const content = this.generateConcordanceContent(data);
-            const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
-            const fileName = `Concordance-${timestamp}.md`;
-            const filePath = `/${fileName}`;
-            const file = await this.app.vault.create(filePath, content);
-            await this.app.workspace.openLinkText(file.path, '');
-            new Notice(`Concordance exported: ${fileName}`);
-        } catch {
-            new Notice('Export failed. See console for details.');
-        }
-    }
-
-    private generateConcordanceContent(data: any): string {
-        const lines: string[] = [];
-        const vaultName = this.app.vault.getName();
-        lines.push(`# ${vaultName} — Scripture Concordance`);
-        lines.push('');
-        lines.push(`Generated: ${new Date().toLocaleString()}`);
-        lines.push(`Unique references: ${Object.keys(data.references).length}`);
-        lines.push(`Files indexed: ${Object.keys(data.fileCache).length}`);
-        lines.push('');
-        lines.push('---');
-
-        const grouped = this.indexer!.getGroupedReferences();
-        for (const [bookId, chapterMap] of grouped) {
-            const bookName = getBookName(
-                bookId,
-                this.settings.outputLanguage,
-                'full'
-            );
-            lines.push(`## ${bookName || `Book ${bookId}`}`);
-            lines.push('');
-            const allRefs: Array<[string, ReferenceIndexEntry, string | null]> = [];
-            for (const [, refs] of chapterMap) {
-                for (const ref of refs) {
-                    allRefs.push(ref);
-                }
-            }
-            allRefs.sort((a, b) => {
-                const aStart = a[0].split('-')[0];
-                const bStart = b[0].split('-')[0];
-                const aCh = parseInt(aStart.substring(2, 5));
-                const bCh = parseInt(bStart.substring(2, 5));
-                if (aCh !== bCh) return aCh - bCh;
-                return parseInt(aStart.substring(5, 8)) - parseInt(bStart.substring(5, 8));
-            });
-
-            for (const [key, entry, formatted] of allRefs) {
-                let formattedRef: string;
-                if (formatted) {
-                    formattedRef = formatted;
-                } else {
-                    const ranges: Array<[string, string]> = [[
-                        `${String(entry.bcv.bookId).padStart(2, '0')}${String(entry.bcv.chapter).padStart(3, '0')}${String(entry.bcv.startVerse).padStart(3, '0')}`,
-                        `${String(entry.bcv.bookId).padStart(2, '0')}${String(entry.bcv.endChapter !== undefined && entry.bcv.endChapter !== entry.bcv.chapter ? entry.bcv.endChapter : entry.bcv.chapter).padStart(3, '0')}${String(entry.bcv.endVerse).padStart(3, '0')}`
-                    ]];
-                    const decoded = decodeScriptures(
-                        ranges,
-                        this.settings.outputLanguage,
-                        this.settings.nameFormat
-                    );
-                    formattedRef = decoded && decoded.length > 0 ? decoded[0] : `${entry.startBcv}-${entry.endBcv}`;
-                }
-
-                const filesWithCounts = this.db?.getFilesWithCounts(key) || [];
-                const sortedFiles = filesWithCounts
-                    .map(f => ({ path: f.path, occurrences: f.occurrences }))
-                    .sort((a, b) => a.path.localeCompare(b.path));
-                const fileEntries: string[] = [];
-                for (const file of sortedFiles) {
-                    const fileName = file.path.replace(/\.md$/, '');
-                    fileEntries.push(`[[${fileName}]]\u2009(${file.occurrences})`);
-                }
-                lines.push(`**${formattedRef}** — ${fileEntries.join('; ')}`);
-            }
-            lines.push('');
-            lines.push('---');
-        }
-        lines.push('---');
-        lines.push('');
-        lines.push(`*Generated by \`con[VER]sum v${this.manifest.version}\`*`);
-        return lines.join('\n');
-    }
-}
+        return decoded && decoded.length > 0 && decoded[0] ? decoded[0] : `${entry.startBcv}-${entry.endBcv}`;\n    }\n\n    public async reformatAllReferences(): Promise<void> {\n        if (!this.indexer) return;\n        const data = this.indexer.getData();\n        if (!data || Object.keys(data.references).length === 0) return;\n        await this.indexer.clearFormatted();\n        this.indexer.startBackgroundFormatting();\n        this.refreshConcordanceView();\n        this.refreshSettings();\n    }\n\n    // ============================================================\n    // FILE WATCHER\n    // ============================================================\n\n    startFileWatcher(): void {\n        if (this.fileWatcherEnabled) return;\n        this.fileWatcherEnabled = true;\n    }\n\n    stopFileWatcher(): void {\n        this.fileWatcherEnabled = false;\n        this.pendingFiles.clear();\n        if (this.rebuildTimeout) {\n            clearTimeout(this.rebuildTimeout);\n            this.rebuildTimeout = null;\n        }\n    }\n\n    private scheduleIndexUpdate(file: TFile): void {\n        if (!this.settings.autoIndex || !this.fileWatcherEnabled) return;\n        if (!this.indexer) return;\n        if (this.indexer.isExcluded(file.path)) return;\n\n        this.pendingFiles.add(file);\n\n        if (this.rebuildTimeout) {\n            clearTimeout(this.rebuildTimeout);\n        }\n\n        this.rebuildTimeout = window.setTimeout(async () => {\n            this.rebuildTimeout = null;\n            if (!this.indexer || this.indexer.isIndexingBusy()) return;\n            const filesToProcess = Array.from(this.pendingFiles);\n            this.pendingFiles.clear();\n\n            for (const f of filesToProcess) {\n                try {\n                    await this.indexer.updateFile(f, true);\n                } catch (e) {\n                    console.error(`con[VER]sum: Failed to update file ${f.path}:`, e);\n                }\n            }\n            this.indexer.startBackgroundFormatting();\n            this.refreshConcordanceView();\n            this.refreshSettings();\n        }, 1500);\n    }\n\n    // ============================================================\n    // EVENTS\n    // ============================================================\n\n    private registerEvents(): void {\n        this.registerEvent(\n            this.app.vault.on('modify', (file: TAbstractFile) => {\n                if (file instanceof TFile && file.extension === 'md') {\n                    this.scheduleIndexUpdate(file);\n                }\n            })\n        );\n\n        this.registerEvent(\n            this.app.vault.on('create', (file: TAbstractFile) => {\n                if (file instanceof TFile && file.extension === 'md') {\n                    if (this.app.workspace.layoutReady) {\n                        this.scheduleIndexUpdate(file);\n                    }\n                }\n            })\n        );\n\n        this.registerEvent(\n            this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {\n                if (file instanceof TFile && file.extension === 'md') {\n                    if (this.indexer && this.isStartupComplete) {\n                        this.indexer.removeFile(oldPath);\n                        this.scheduleIndexUpdate(file);\n                    }\n                }\n            })\n        );\n\n        this.registerEvent(\n            this.app.vault.on('delete', (file: TAbstractFile) => {\n                if (file instanceof TFile && file.extension === 'md') {\n                    if (this.indexer && this.isStartupComplete) {\n                        this.indexer.removeFile(file.path);\n                        this.refreshConcordanceView();\n                        this.refreshSettings();\n                    }\n                }\n            })\n        );\n\n        // Context menu - editor mode\n        this.registerEvent(\n            this.app.workspace.on('editor-menu', (menu, editor) => {\n                const cursor = editor.getCursor();\n                const line = editor.getLine(cursor.line);\n                let hasReference = false;\n                let matchedEntry: any = null;\n\n                if (isEngineReady()) {\n                    const activeFile = this.app.workspace.getActiveFile();\n                    const sourceLang = this.getEffectiveSourceLanguage(activeFile);\n                    const processedLine = this.transformForcedReferences(line);\n                    const parsed = parseReferences(\n                        processedLine,\n                        sourceLang,\n                        this.settings.outputLanguage,\n                        this.settings.nameFormat\n                    );\n\n                    if (parsed && parsed.length > 0) {\n                        const cursorCh = cursor.ch;\n                        for (const entry of parsed) {\n                            const startPos = entry[1] as number;\n                            const endPos = entry[2] as number;\n                            if (cursorCh > startPos && cursorCh < endPos) {\n                                hasReference = true;\n                                matchedEntry = entry;\n                                break;\n                            }\n                        }\n                    }\n                }\n\n                menu.addItem((item: any) => {\n                    item.setTitle('con[VER]sum').setIcon('book-open');\n                    const submenu = item.setSubmenu();\n                    submenu.addItem((subItem: any) => {\n                        subItem.setTitle('Open concordance').setIcon('book-open');\n                        subItem.onClick(() => {\n                            this.openConcordanceView();\n                        });\n                    });\n                    if (hasReference && matchedEntry) {\n                        submenu.addItem((subItem: any) => {\n                            subItem.setTitle('Find related notes').setIcon('link');\n                            subItem.onClick(() => {\n                                this.showRelatedNotesFromParsed([matchedEntry]);\n                            });\n                        });\n                    }\n                });\n            })\n        );\n\n        // Context menu - reading mode\n        this.registerDomEvent(activeDocument, 'contextmenu', (evt: MouseEvent) => {\n            const view = this.app.workspace.getActiveViewOfType(MarkdownView);\n            if (!view || view.getMode() !== 'preview') return;\n            const activeFile = this.app.workspace.getActiveFile();\n            const sourceLang = this.getEffectiveSourceLanguage(activeFile);\n            let parsed: any[] | null = null;\n            const selection = activeDocument.getSelection()?.toString() || '';\n            if (selection) {\n                const processedText = this.transformForcedReferences(selection);\n                parsed = parseReferences(processedText, sourceLang, this.settings.outputLanguage, this.settings.nameFormat);\n                if (parsed && parsed.length > 0) {\n                    this.showReadingModeMenu(evt, parsed);\n                    return;\n                }\n            }\n            const element = activeDocument.elementFromPoint(evt.clientX, evt.clientY);\n            if (!element) {\n                this.showReadingModeMenu(evt, null);\n                return;\n            }\n            const range = activeDocument.caretRangeFromPoint(evt.clientX, evt.clientY);\n            let isAtEnd = false;\n            if (range) {\n                const container = range.startContainer;\n                if (container.nodeType === Node.TEXT_NODE) {\n                    const textNode = container as Text;\n                    const text = textNode.textContent || '';\n                    const offset = range.startOffset;\n                    if (offset >= text.length) {\n                        let nextSibling = textNode.nextSibling;\n                        let hasTextAfter = false;\n                        while (nextSibling) {\n                            if (nextSibling.nodeType === Node.TEXT_NODE) {\n                                const siblingText = (nextSibling as Text).textContent || '';\n                                if (siblingText.trim().length > 0) {\n                                    hasTextAfter = true;\n                                    break;\n                                }\n                            } else if (nextSibling.nodeType === Node.ELEMENT_NODE) {\n                                const elementText = (nextSibling as Element).textContent || '';\n                                if (elementText.trim().length > 0) {\n                                    hasTextAfter = true;\n                                    break;\n                                }\n                            }\n                            nextSibling = nextSibling.nextSibling;\n                        }\n                        if (!hasTextAfter) {\n                            isAtEnd = true;\n                        }\n                    }\n                }\n            }\n            if (isAtEnd) {\n                this.showReadingModeMenu(evt, null);\n                return;\n            }\n            let textToParse = '';\n            const linkEl = element.closest('a');\n            if (linkEl) {\n                const dataBcv = linkEl.getAttribute('data-bcv');\n                const linkText = linkEl.textContent || '';\n                if (dataBcv) {\n                    const rangeKey = `${dataBcv}-${dataBcv}`;\n                    const entry = this.indexer?.getReference(rangeKey);\n                    if (entry) {\n                        const refData = [[linkText, 0, linkText.length, [[dataBcv, dataBcv]]]];\n                        this.showReadingModeMenu(evt, refData as any[]);\n                    } else {\n                        this.showReadingModeMenu(evt, null);\n                    }\n                    return;\n                }\n                const parent = linkEl.parentElement;\n                if (parent) {\n                    const parentText = parent.textContent || '';\n                    const forceMatch = parentText.match(/\\{\\{(.+?)\\}\\}/);\n                    if (forceMatch) {\n                        textToParse = forceMatch[0];\n                    } else {\n                        textToParse = linkText;\n                    }\n                } else {\n                    textToParse = linkText;\n                }\n            } else {\n                if (range && range.startContainer) {\n                    const container = range.startContainer;\n                    if (container.nodeType === Node.TEXT_NODE) {\n                        const textNode = container as Text;\n                        const fullText = textNode.textContent || '';\n                        const forceMatch = fullText.match(/\\{\\{(.+?)\\}\\}/);\n                        if (forceMatch) {\n                            textToParse = forceMatch[0];\n                        } else {\n                            textToParse = fullText;\n                        }\n                    }\n                }\n            }\n            if (textToParse && !textToParse.includes('{{')) {\n                const clickedText = textToParse.trim();\n                if (clickedText.length === 0) {\n                    const parentElement = element.closest('p, div, span, a');\n                    if (parentElement) {\n                        const fullText = parentElement.textContent || '';\n                        const forceMatch = fullText.match(/\\{\\{(.+?)\\}\\}/);\n                        if (forceMatch) {\n                            textToParse = forceMatch[0];\n                        }\n                    }\n                }\n            }\n            if (textToParse) {\n                const processedText = this.transformForcedReferences(textToParse);\n                const parsedResult = parseReferences(processedText, sourceLang, this.settings.outputLanguage, this.settings.nameFormat);\n                if (parsedResult && parsedResult.length > 0) {\n                    const refText = parsedResult[0][0] as string;\n                    const contextText = element.textContent || '';\n                    const parentText = element.parentElement?.textContent || '';\n                    const fullContext = parentText || contextText;\n                    if (fullContext.includes(refText) || textToParse.includes(refText)) {\n                        parsed = parsedResult;\n                    }\n                }\n            }\n            this.showReadingModeMenu(evt, parsed);\n        });\n    }\n\n    private showReadingModeMenu(evt: MouseEvent, parsed: any[] | null): void {\n        evt.preventDefault();\n        evt.stopPropagation();\n        const menu = new Menu();\n        menu.addItem((item: any) => {\n            item.setTitle('con[VER]sum').setIcon('book-open');\n            const submenu = item.setSubmenu();\n            submenu.addItem((subItem: any) => {\n                subItem.setTitle('Open concordance').setIcon('book-open');\n                subItem.onClick(() => {\n                    this.openConcordanceView();\n                });\n            });\n            if (parsed && parsed.length > 0) {\n                const range = activeDocument.caretRangeFromPoint(evt.clientX, evt.clientY);\n                let isOnRef = false;\n                if (range) {\n                    const node = range.startContainer;\n                    if (node.nodeType === Node.TEXT_NODE) {\n                        const text = (node as Text).textContent || '';\n                        const offset = range.startOffset;\n                        const refText = parsed[0][0] as string;\n                        const cleanText = text.replace(/\\{\\{|\\}\\}/g, '');\n                        if (cleanText.includes(refText)) {\n                            const startIdx = cleanText.indexOf(refText);\n                            const endIdx = startIdx + refText.length;\n                            const beforeRef = text.substring(0, text.indexOf(refText));\n                            const markerOffset = (beforeRef.match(/\\{\\{/g) || []).length * 2;\n                            const cleanOffset = offset - markerOffset;\n                            if (cleanOffset >= startIdx && cleanOffset < endIdx) {\n                                isOnRef = true;\n                            }\n                        }\n                    } else {\n                        const parent = node.parentElement;\n                        if (parent) {\n                            const text = parent.textContent || '';\n                            const refText = parsed[0][0] as string;\n                            if (text.includes(refText)) {\n                                isOnRef = true;\n                            }\n                        }\n                    }\n                }\n                if (isOnRef) {\n                    submenu.addItem((subItem: any) => {\n                        subItem.setTitle('Find related notes').setIcon('link');\n                        subItem.onClick(() => {\n                            this.showRelatedNotesFromParsed(parsed);\n                        });\n                    });\n                }\n            }\n        });\n        menu.showAtPosition({ x: evt.clientX, y: evt.clientY - 70 });\n    }\n\n    // ============================================================\n    // COMMANDS\n    // ============================================================\n\n    private addCommands(): void {\n        this.addCommand({\n            id: 'find-related-notes',\n            name: 'Find related notes',\n            icon: 'link',\n            editorCallback: (editor: Editor) => {\n                const cursor = editor.getCursor();\n                const line = editor.getLine(cursor.line);\n                this.findRelatedNotesAtCursor(editor, cursor, line);\n            }\n        });\n        this.addCommand({\n            id: 'open-concordance',\n            name: 'Open concordance',\n            icon: 'book-open',\n            callback: () => this.openConcordanceView()\n        });\n    }\n\n    // ============================================================\n    // VIEW MANAGEMENT\n    // ============================================================\n\n    async openConcordanceView(): Promise<void> {\n        const { workspace } = this.app;\n        let leaf = workspace.getLeavesOfType(VIEW_TYPE_CONVERSUM_CONCORDANCE)[0];\n        if (!leaf) {\n            const rightLeaf = workspace.getRightLeaf(false);\n            if (!rightLeaf) {\n                new Notice('Could not create view');\n                return;\n            }\n            await rightLeaf.setViewState({\n                type: VIEW_TYPE_CONVERSUM_CONCORDANCE,\n                active: true\n            });\n            leaf = rightLeaf;\n        }\n        await workspace.revealLeaf(leaf);\n    }\n\n    public refreshConcordanceView(): void {\n        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CONVERSUM_CONCORDANCE);\n        for (const leaf of leaves) {\n            const view = leaf.view as ConcordanceView;\n            if (view && typeof view.refresh === 'function') {\n                view.refresh();\n            }\n        }\n    }\n\n    public refreshSettings(): void {\n        if (this.settingsTab) {\n            if (this.settingsTab.containerEl && this.settingsTab.containerEl.children.length > 0) {\n                this.settingsTab.display();\n                return;\n            }\n        }\n        const settingTabs = (this.app as any).setting?.tabContainer?.children;\n        if (settingTabs) {\n            for (const child of settingTabs) {\n                if (child.textContent?.includes('con[VER]sum')) {\n                    const tab = child as any;\n                    if (tab && typeof tab.display === 'function') {\n                        tab.display();\n                    }\n                    break;\n                }\n            }\n        }\n    }\n\n    // ============================================================\n    // EFFECTIVE SOURCE LANGUAGE\n    // ============================================================\n\n    private getEffectiveSourceLanguage(file: TFile | null): string {\n        if (!file || !this.db) return this.settings.sourceLanguage;\n        const language = this.db.getFileLanguage(file.path);\n        return language || this.settings.sourceLanguage;\n    }\n\n    // ============================================================\n    // FIND REFERENCE AT CURSOR\n    // ============================================================\n\n    private findReferenceAtPosition(line: string, position: number, sourceLang: string): { text: string; startBcv: string; endBcv: string } | null {\n        if (!isEngineReady()) return null;\n        const processedLine = this.transformForcedReferences(line);\n        const parsed = parseReferences(\n            processedLine,\n            sourceLang,\n            this.settings.outputLanguage,\n            this.settings.nameFormat\n        );\n        if (!parsed || parsed.length === 0) {\n            return null;\n        }\n        for (const entry of parsed) {\n            const startPos = entry[1] as number;\n            const endPos = entry[2] as number;\n            const matchedText = entry[0] as string;\n            const ranges = entry[3] as string[][];\n            if (position >= startPos && position < endPos) {\n                if (ranges && ranges.length > 0) {\n                    return {\n                        text: matchedText,\n                        startBcv: ranges[0][0],\n                        endBcv: ranges[0][1]\n                    };\n                }\n            }\n        }\n        return null;\n    }\n\n    private showRelatedNotesFromParsed(parsed: any[], evt?: MouseEvent): void {\n        if (!parsed || parsed.length === 0) {\n            const activeFile = this.app.workspace.getActiveFile();\n            const sourceLang = this.getEffectiveSourceLanguage(activeFile);\n            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;\n            new Notice(`No scripture reference found in ${langName}`);\n            return;\n        }\n        \n        const ranges = parsed[0][3] as string[][];\n        if (!ranges || ranges.length === 0) {\n            const activeFile = this.app.workspace.getActiveFile();\n            const sourceLang = this.getEffectiveSourceLanguage(activeFile);\n            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;\n            new Notice(`No valid reference found in ${langName}`);\n            return;\n        }\n\n        const startBcv = ranges[0][0];\n        const endBcv = ranges[0][1];\n        if (!startBcv || startBcv.length < 8) {\n            const activeFile = this.app.workspace.getActiveFile();\n            const sourceLang = this.getEffectiveSourceLanguage(activeFile);\n            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;\n            new Notice(`Invalid reference format in ${langName}`);\n            return;\n        }\n\n        const matchingEntries = this.indexer?.findReferencesContainingRange(startBcv, endBcv) || [];\n        if (matchingEntries.length === 0) {\n            const activeFile = this.app.workspace.getActiveFile();\n            const sourceLang = this.getEffectiveSourceLanguage(activeFile);\n            const langName = getAvailableLanguages().find(l => l.language_code === sourceLang)?.language_name || sourceLang;\n            new Notice(`No notes found for this reference in ${langName}`);\n            return;\n        }\n\n        const firstEntry = matchingEntries[0][1];\n        const formatted = this.formatReferenceOnTheFly(firstEntry);\n        if (evt) {\n            this.relatedPopout?.showWithEntries(startBcv, formatted, matchingEntries, evt.clientX, evt.clientY);\n        } else {\n            this.relatedPopout?.showWithEntries(startBcv, formatted, matchingEntries, window.innerWidth / 2 - 150, window.innerHeight / 2 - 100);\n        }\n    }\n\n    private findRelatedNotesAtCursor(editor: Editor, cursor: EditorPosition, line: string): void {\n        if (!isEngineReady()) {\n            new Notice('Engine not ready');\n            return;\n        }\n        if (!this.indexer) {\n            new Notice('Indexer not initialized');\n            return;\n        }\n\n        const activeFile = this.app.workspace.getActiveFile();\n        const sourceLang = this.getEffectiveSourceLanguage(activeFile);\n        const result = this.findReferenceAtPosition(line, cursor.ch, sourceLang);\n        if (!result) {\n            const wordMatch = line.substring(0, cursor.ch).match(/\\S+$/);\n            const nextWordMatch = line.substring(cursor.ch).match(/^\\S+/);\n            const word = wordMatch ? wordMatch[0] : (nextWordMatch ? nextWordMatch[0] : null);\n            if (word) {\n                new Notice(`\"${word}\" is not a scripture reference`);\n            } else {\n                new Notice('No scripture reference found at cursor');\n            }\n            return;\n        }\n\n        const { text: reference, startBcv, endBcv } = result;\n        if (!startBcv || startBcv.length < 8) {\n            new Notice('Invalid reference format');\n            return;\n        }\n        const matchingEntries = this.indexer.findReferencesContainingRange(startBcv, endBcv);\n        if (matchingEntries.length === 0) {\n            const langName = getAvailableLanguages().find(l => l.code === sourceLang)?.vernacularName || sourceLang;\n            new Notice(`No notes found for \"${reference}\" in ${langName}`);\n            return;\n        }\n\n        const firstEntry = matchingEntries[0][1];\n        const formatted = this.formatReferenceOnTheFly(firstEntry);\n        let x = 0, y = 0;\n        try {\n            const editorView = (editor as any).cm?.view || (editor as any).cm;\n            if (editorView && typeof editorView.coordsAtPos === 'function') {\n                const pos = editorView.posAtCoords({ line: cursor.line, ch: cursor.ch });\n                if (pos !== null && pos !== undefined) {\n                    const coords = editorView.coordsAtPos(pos);\n                    if (coords) {\n                        x = coords.left || 0;\n                        y = (coords.top || 0) + 25;\n                    }\n                }\n            }\n        } catch { }\n\n        if (x === 0 && y === 0) {\n            const activeEl = activeDocument.activeElement;\n            if (activeEl) {\n                const rect = activeEl.getBoundingClientRect();\n                x = rect.left + 20;\n                y = rect.top + 40;\n            }\n        }\n        if (x === 0 && y === 0) {\n            x = window.innerWidth / 2 - 150;\n            y = window.innerHeight / 2 - 100;\n        }\n        this.relatedPopout?.showWithEntries(startBcv, formatted, matchingEntries, x, y);\n    }\n\n    // ============================================================\n    // EXPORT\n    // ============================================================\n\n    async exportConcordance(): Promise<void> {\n        if (!this.indexer) {\n            new Notice('Indexer not initialized');\n            return;\n        }\n        const data = this.indexer.getData();\n        if (!data || Object.keys(data.references).length === 0) {\n            new Notice('No references to export');\n            return;\n        }\n        try {\n            const content = this.generateConcordanceContent(data);\n            const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');\n            const fileName = `Concordance-${timestamp}.md`;\n            const filePath = `/${fileName}`;\n            const file = await this.app.vault.create(filePath, content);\n            await this.app.workspace.openLinkText(file.path, '');\n            new Notice(`Concordance exported: ${fileName}`);\n        } catch {\n            new Notice('Export failed. See console for details.');\n        }\n    }\n\n    private generateConcordanceContent(data: any): string {\n        const lines: string[] = [];\n        const vaultName = this.app.vault.getName();\n        lines.push(`# ${vaultName} — Scripture Concordance`);\n        lines.push('');\n        lines.push(`Generated: ${new Date().toLocaleString()}`);\n        lines.push(`Unique references: ${Object.keys(data.references).length}`);\n        lines.push(`Files indexed: ${Object.keys(data.fileCache).length}`);\n        lines.push('');\n        lines.push('---');\n\n        const grouped = this.indexer!.getGroupedReferences();\n        for (const [bookId, chapterMap] of grouped) {\n            const bookName = getBookName(\n                bookId,\n                this.settings.outputLanguage,\n                'full'\n            );\n            lines.push(`## ${bookName || `Book ${bookId}`}`);\n            lines.push('');\n            const allRefs: Array<[string, ReferenceIndexEntry, string | null]> = [];\n            for (const [, refs] of chapterMap) {\n                for (const ref of refs) {\n                    allRefs.push(ref);\n                }\n            }\n            allRefs.sort((a, b) => {\n                const aStart = a[0].split('-')[0];\n                const bStart = b[0].split('-')[0];\n                const aCh = parseInt(aStart.substring(2, 5));\n                const bCh = parseInt(bStart.substring(2, 5));\n                if (aCh !== bCh) return aCh - bCh;\n                return parseInt(aStart.substring(5, 8)) - parseInt(bStart.substring(5, 8));\n            });\n\n            for (const [key, entry, formatted] of allRefs) {\n                let formattedRef: string;\n                if (formatted) {\n                    formattedRef = formatted;\n                } else {\n                    const ranges: Array<[string, string]> = [[\n                        `${String(entry.bcv.bookId).padStart(2, '0')}${String(entry.bcv.chapter).padStart(3, '0')}${String(entry.bcv.startVerse).padStart(3, '0')}`,\n                        `${String(entry.bcv.bookId).padStart(2, '0')}${String(entry.bcv.endChapter !== undefined && entry.bcv.endChapter !== entry.bcv.chapter ? entry.bcv.endChapter : entry.bcv.chapter).padStart(3, '0')}${String(entry.bcv.endVerse).padStart(3, '0')}`\n                    ]];\n                    const decoded = decodeScriptures(\n                        ranges,\n                        this.settings.outputLanguage,\n                        this.settings.nameFormat\n                    );\n                    formattedRef = decoded && decoded.length > 0 ? decoded[0] : `${entry.startBcv}-${entry.endBcv}`;\n                }\n\n                const filesWithCounts = this.db?.getFilesWithCounts(key) || [];\n                const sortedFiles = filesWithCounts\n                    .map(f => ({ path: f.path, occurrences: f.occurrences }))\n                    .sort((a, b) => a.path.localeCompare(b.path));\n                const fileEntries: string[] = [];\n                for (const file of sortedFiles) {\n                    const fileName = file.path.replace(/\\.md$/, '');\n                    fileEntries.push(`[[${fileName}]]\\u2009(${file.occurrences})`);\n                }\n                lines.push(`**${formattedRef}** — ${fileEntries.join('; ')}`);\n            }\n            lines.push('');\n            lines.push('---');\n        }\n        lines.push('---');\n        lines.push('');\n        lines.push(`*Generated by \\`con[VER]sum v${this.manifest.version}\\`*`);\n        return lines.join('\\n');\n    }\n}\n

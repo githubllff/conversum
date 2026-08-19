@@ -2,7 +2,7 @@
 
 import type { Vault, TFile } from 'obsidian';
 import { IndexDatabase } from './database';
-import { parseReferences, isEngineReady, decodeScriptures, resolveLanguage } from './engine-wrapper';
+import { parseReferences, isEngineReady, decodeScriptures, resolveLanguage } from './engine';
 import type ConversumPlugin from './main';
 import { ReferenceIndexEntry, FileCacheEntry, IndexProgress, ConversumData } from './types';
 
@@ -74,19 +74,24 @@ export class ScriptureIndexer {
     }
 
     public isExcluded(filePath: string): boolean {
-        const configDir = this.plugin.app.vault.configDir;
-        const hardcodedExclusions = ['_templates', '_attachments', configDir];
+        const hardcodedExclusions = ['_templates', '_attachments', '.obsidian'];
+        const normalizedPath = filePath.replace(/\\/g, '/');
+        const pathSegments = normalizedPath.split('/');
+
         for (const folder of hardcodedExclusions) {
-            if (filePath.startsWith(folder + '/') || filePath === folder) {
+            const clean = folder.replace(/^\/+|\/+$/g, '');
+            if (normalizedPath === clean || normalizedPath.startsWith(clean + '/') || pathSegments.includes(clean)) {
                 return true;
             }
         }
         for (const folder of this.excludedFolders) {
-            if (filePath.startsWith(folder + '/') || filePath === folder) {
+            const clean = folder.trim().replace(/^\/+|\/+$/g, '');
+            if (!clean) continue;
+            if (normalizedPath === clean || normalizedPath.startsWith(clean + '/') || pathSegments.includes(clean)) {
                 return true;
             }
         }
-        if (filePath.startsWith('Concordance-') && filePath.endsWith('.md')) {
+        if (normalizedPath.startsWith('Concordance-') && normalizedPath.endsWith('.md')) {
             return true;
         }
         return false;
@@ -202,7 +207,8 @@ export class ScriptureIndexer {
                     });
                 }
             }
-        } catch {
+        } catch (e) {
+            console.error('con[VER]sum: parseReferences error:', e);
         }
         return result;
     }
@@ -226,7 +232,7 @@ export class ScriptureIndexer {
     abortFormatting(): void {
         this.formattingAbortRequested = true;
         if (this.formattingTimeout) {
-            window.clearTimeout(this.formattingTimeout);
+            clearTimeout(this.formattingTimeout);
             this.formattingTimeout = null;
         }
         this.isFormatting = false;
@@ -235,13 +241,13 @@ export class ScriptureIndexer {
     startBackgroundFormatting(): void {
         if (this.isFormatting) {
             this.abortFormatting();
-            window.setTimeout(() => {
+            setTimeout(() => {
                 this.startBackgroundFormatting();
             }, 50);
             return;
         }
         if (this.isIndexing) {
-            window.setTimeout(() => {
+            setTimeout(() => {
                 this.startBackgroundFormatting();
             }, 5000);
             return;
@@ -253,7 +259,6 @@ export class ScriptureIndexer {
         }
         this.isFormatting = true;
         this.formattingAbortRequested = false;
-        // console.log(`con[VER]sum: Starting background formatting (${unformattedCount} unformatted references)`); // DEBUG
         this.plugin.refreshSettings();
         this.formattingTimeout = window.setTimeout(() => {
             this.formatBatch();
@@ -269,7 +274,6 @@ export class ScriptureIndexer {
         const rangeKeys = this.db.getUnformattedRangeKeys(this.formattingBatchSize);
         if (rangeKeys.length === 0) {
             this.isFormatting = false;
-            // console.log('con[VER]sum: Formatting complete'); // DEBUG
             this.plugin.refreshConcordanceView();
             this.plugin.refreshSettings();
             return;
@@ -280,9 +284,7 @@ export class ScriptureIndexer {
                 if (this.formattingAbortRequested) break;
                 try {
                     const data = this.db.getOccurrenceData(rangeKey);
-                    if (!data) {
-                        continue;
-                    }
+                    if (!data) continue;
                     const ranges: Array<[string, string]> = [[
                         `${String(data.bookId).padStart(2, '0')}${String(data.chapter).padStart(3, '0')}${String(data.startVerse).padStart(3, '0')}`,
                         `${String(data.bookId).padStart(2, '0')}${String(data.endChapter !== undefined && data.endChapter !== data.chapter ? data.endChapter : data.chapter).padStart(3, '0')}${String(data.endVerse).padStart(3, '0')}`
@@ -370,6 +372,12 @@ export class ScriptureIndexer {
                     return this.data;
                 }
                 this.progress.currentFile = file.path;
+
+                // Yield to the event loop periodically to prevent UI thread starvation
+                if (processedCount > 0 && processedCount % 25 === 0) {
+                    await new Promise((resolve) => window.setTimeout(resolve, 0));
+                }
+
                 try {
                     const content = await this.vault.read(file);
                     const fileLanguage = this.getFileLanguage(content);
@@ -449,7 +457,6 @@ export class ScriptureIndexer {
                 await this.plugin.saveSettings();
             } catch {
             }
-            // console.log(`con[VER]sum: Index rebuild complete: ${Object.keys(newData.references).length} unique refs`); // DEBUG
             this.progress.status = 'complete';
             this.progress.currentFile = undefined;
             onProgress?.(this.progress);
@@ -607,13 +614,18 @@ export class ScriptureIndexer {
 
     async rebuildAllHTML(): Promise<void> {
         const rangeKeys = this.db.getAllRangeKeys();
+        let successCount = 0;
+        let failCount = 0;
         this.db.beginTransaction();
         try {
             for (const rangeKey of rangeKeys) {
                 try {
                     const formatted = this.db.getFormatted(rangeKey);
                     if (!formatted) continue;
+                    this.db.getFilesWithCounts(rangeKey);
+                    successCount++;
                 } catch {
+                    failCount++;
                 }
             }
             await this.db.commitTransaction();
@@ -661,9 +673,9 @@ export class ScriptureIndexer {
         this.nameFormat = nameFormat;
         this.excludedFolders = excludedFolders;
         if (outputChanged) {
-            // console.log('con[VER]sum: Output language or format changed, clearing formatted cache...'); // DEBUG
-            void this.clearFormatted().then(() => {
+            this.clearFormatted().then(() => {
                 this.startBackgroundFormatting();
+            }).catch(() => {
             });
         }
     }
