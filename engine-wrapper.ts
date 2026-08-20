@@ -7,8 +7,8 @@ let engineInitialized = false;
 
 const enginePool = new Map<string, any>();
 
-function getEngineKey(language: string, format: 'full' | 'standard' | 'official'): string {
-    return `${language}|${format}`;
+export function clearEnginePool(): void {
+    enginePool.clear();
 }
 
 export async function initEngine(): Promise<void> {
@@ -23,15 +23,21 @@ export async function initEngine(): Promise<void> {
     }
 }
 
+export function prewarmEngines(sourceLanguage: string, outputLanguage: string): void {
+    if (!engineInitialized) return;
+    
+    const formats: Array<'full' | 'standard' | 'official'> = ['full', 'standard', 'official'];
+    for (const format of formats) {
+        getOrCreateEngine(sourceLanguage, outputLanguage, format);
+    }
+}
+
 function getOrCreateEngine(
     language: string,
-    format: 'full' | 'standard' | 'official' = 'full'
-): any | null {
-    if (!engineInitialized) {
-        console.error('con[VER]sum: Engine not initialized');
-        return null;
-    }
-    const key = getEngineKey(language, format);
+    outputLanguage: string,
+    format: 'full' | 'standard' | 'official'
+): any {
+    const key = `${language}-${outputLanguage}-${format}`;
     if (enginePool.has(key)) {
         return enginePool.get(key);
     }
@@ -44,31 +50,33 @@ function getOrCreateEngine(
     }
 }
 
-export function prewarmEngines(sourceLanguage: string, outputLanguage: string): void {
-    if (!engineInitialized) return;
-    getOrCreateEngine(sourceLanguage, 'full');
-    getOrCreateEngine(outputLanguage, 'full');
-    getOrCreateEngine(outputLanguage, 'standard');
-    getOrCreateEngine(outputLanguage, 'official');
-}
-
-export function clearEnginePool(): void {
-    enginePool.clear();
-}
-
-export function getEnginePoolSize(): number {
-    return enginePool.size;
-}
-
-function getParsingEngine(sourceLanguage: string): any | null {
-    return getOrCreateEngine(sourceLanguage, 'full');
-}
-
-function getDecodingEngine(
-    outputLanguage: string,
-    nameFormat: 'full' | 'standard' | 'official' = 'full'
-): any | null {
-    return getOrCreateEngine(outputLanguage, nameFormat);
+export function isWholeBookReference(startBcv: string, endBcv: string): boolean {
+    if (!startBcv || !endBcv || startBcv.length < 8 || endBcv.length < 8) {
+        return false;
+    }
+    
+    const startBook = parseInt(startBcv.substring(0, 2));
+    const endBook = parseInt(endBcv.substring(0, 2));
+    if (startBook !== endBook) {
+        return false;
+    }
+    
+    const startChapter = parseInt(startBcv.substring(2, 5));
+    const startVerse = parseInt(startBcv.substring(5, 8));
+    if (startChapter !== 1 || startVerse !== 1) {
+        return false;
+    }
+    
+    const endChapter = parseInt(endBcv.substring(2, 5));
+    const endVerse = parseInt(endBcv.substring(5, 8));
+    const totalChapters = getChapterCount(startBook);
+    
+    if (endChapter !== totalChapters) {
+        return false;
+    }
+    
+    const lastChapterVerses = getVerseCount(startBook, totalChapters);
+    return endVerse === lastChapterVerses;
 }
 
 export function isEngineReady(): boolean {
@@ -95,20 +103,6 @@ export function getVerseCount(bookId: number, chapter: number): number {
     } catch {
         return 1;
     }
-}
-
-export function isWholeBookReference(startBcv: string, endBcv: string): boolean {
-    const bookId = parseInt(startBcv.substring(0, 2));
-    const startChapter = parseInt(startBcv.substring(2, 5));
-    const startVerse = parseInt(startBcv.substring(5, 8));
-    const endChapter = parseInt(endBcv.substring(2, 5));
-    const endVerse = parseInt(endBcv.substring(5, 8));
-    if (startChapter !== 1 || startVerse !== 1) return false;
-    const lastChapter = getChapterCount(bookId);
-    if (lastChapter === 0) return false;
-    if (endChapter !== lastChapter) return false;
-    const lastVerse = getVerseCount(bookId, lastChapter);
-    return endVerse === lastVerse;
 }
 
 export function getBookName(
@@ -149,12 +143,11 @@ export function getAvailableLanguages(): any[] {
         return parsed
             .filter((lang: any) => lang.code !== 'ase' && lang.language_code !== 'ase')
             .map((lang: any) => ({
-                language_code: lang.language_code || lang.code,
-                language_symbol: lang.language_symbol || lang.symbol,
-                language_name: lang.language_name || lang.vernacularName || lang.languageName,
-                english_name: lang.english_name || lang.englishName,
-                code: lang.language_code || lang.code,
-                symbol: lang.language_symbol || lang.symbol,
+                code: lang.code || lang.language_code,
+                language_code: lang.code || lang.language_code,
+                suffix: lang.symbol || lang.suffix || '',
+                language_name: lang.vernacular_name || lang.language_name || lang.vernacularName || lang.languageName,
+                vernacular_name: lang.vernacular_name || lang.language_name || lang.vernacularName || lang.languageName,
                 vernacularName: lang.language_name || lang.vernacularName || lang.languageName,
                 englishName: lang.english_name || lang.englishName
             }));
@@ -164,24 +157,22 @@ export function getAvailableLanguages(): any[] {
 }
 
 export function resolveLanguage(input: string): string | null {
-    const languages = getAvailableLanguages();
-    if (languages.length === 0) return null;
-    if (!input || typeof input !== 'string') return null;
-    const cleanInput = input.trim().replace(/^["']|["']$/g, '').toLowerCase();
-    for (const lang of languages) {
-        if (lang.language_code && lang.language_code.toLowerCase() === cleanInput) {
-            return lang.language_code;
-        }
-        if (lang.language_symbol && lang.language_symbol.toLowerCase() === cleanInput) {
-            return lang.language_code;
-        }
-        if (lang.language_name && lang.language_name.toLowerCase() === cleanInput) {
-            return lang.language_code;
-        }
-        if (lang.english_name && lang.english_name.toLowerCase() === cleanInput) {
-            return lang.language_code;
-        }
-    }
+    if (!input) return null;
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    
+    const available = getAvailableLanguages();
+    const lower = trimmed.toLowerCase();
+    
+    const byCode = available.find(l => l.code.toLowerCase() === lower);
+    if (byCode) return byCode.code;
+    
+    const byName = available.find(l => l.language_name.toLowerCase() === lower);
+    if (byName) return byName.code;
+    
+    const byEnglish = available.find(l => l.englishName && l.englishName.toLowerCase() === lower);
+    if (byEnglish) return byEnglish.code;
+    
     return null;
 }
 
@@ -192,14 +183,26 @@ export function parseReferences(
     nameFormat: 'full' | 'standard' | 'official' = 'full',
     capitalize: boolean = false
 ): any[] | null {
+    if (!text || text.trim().length === 0) return [];
     const resolvedSource = resolveLanguage(sourceLanguage) || sourceLanguage;
-    const engine = getParsingEngine(resolvedSource);
+    const key = `${resolvedSource}-${outputLanguage}-${nameFormat}`;
+    let engine = getOrCreateEngine(resolvedSource, outputLanguage, nameFormat);
     if (!engine) return null;
+    
     try {
         const result = engine.parse(resolvedSource, outputLanguage, nameFormat, capitalize, text);
         return JSON.parse(result);
     } catch {
-        return null;
+        // Auto-heal: evict panicked/corrupted engine and retry with fresh instance
+        enginePool.delete(key);
+        try {
+            const freshEngine = new wasmModule.TravertureEngine(resolvedSource, resolvedSource, nameFormat, false);
+            enginePool.set(key, freshEngine);
+            const retryResult = freshEngine.parse(resolvedSource, outputLanguage, nameFormat, capitalize, text);
+            return JSON.parse(retryResult);
+        } catch {
+            return null;
+        }
     }
 }
 
@@ -208,15 +211,14 @@ export function decodeScriptures(
     outputLanguage: string,
     nameFormat: 'full' | 'standard' | 'official' = 'full'
 ): string[] | null {
-    const resolvedOutput = resolveLanguage(outputLanguage) || outputLanguage;
-    const engine = getDecodingEngine(resolvedOutput, nameFormat);
+    const engine = getOrCreateEngine(outputLanguage, outputLanguage, nameFormat);
     if (!engine) return null;
+    
     try {
-        const json = JSON.stringify(ranges);
-        const result = engine.decode_scriptures(json);
+        const rangesJson = JSON.stringify(ranges);
+        const result = engine.decode(outputLanguage, nameFormat, rangesJson);
         return JSON.parse(result);
-    } catch (e) {
-        console.error('con[VER]sum: Failed to decode scriptures:', e);
+    } catch {
         return null;
     }
 }

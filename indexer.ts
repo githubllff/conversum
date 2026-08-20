@@ -76,18 +76,17 @@ export class ScriptureIndexer {
     public isExcluded(filePath: string): boolean {
         const hardcodedExclusions = ['_templates', '_attachments', '.obsidian'];
         const normalizedPath = filePath.replace(/\\/g, '/');
-        const pathSegments = normalizedPath.split('/');
 
         for (const folder of hardcodedExclusions) {
             const clean = folder.replace(/^\/+|\/+$/g, '');
-            if (normalizedPath === clean || normalizedPath.startsWith(clean + '/') || pathSegments.includes(clean)) {
+            if (normalizedPath === clean || normalizedPath.startsWith(clean + '/')) {
                 return true;
             }
         }
         for (const folder of this.excludedFolders) {
             const clean = folder.trim().replace(/^\/+|\/+$/g, '');
             if (!clean) continue;
-            if (normalizedPath === clean || normalizedPath.startsWith(clean + '/') || pathSegments.includes(clean)) {
+            if (normalizedPath === clean || normalizedPath.startsWith(clean + '/')) {
                 return true;
             }
         }
@@ -104,7 +103,8 @@ export class ScriptureIndexer {
         const frontmatterText = content.substring(3, endIndex).trim();
         const result: any = {};
         for (const line of frontmatterText.split('\n')) {
-            const match = line.match(/^([^:]+):\s*(.+)$/);
+            const cleanLine = line.replace(/\r/g, '');
+            const match = cleanLine.match(/^([^:]+):\s*(.+)$/);
             if (match) {
                 const key = match[1].trim().toLowerCase();
                 let value = match[2].trim();
@@ -152,9 +152,9 @@ export class ScriptureIndexer {
             endBcv: string; 
             bookId: number; 
             chapter: number; 
-            startVerse: number;
-            endVerse: number;
-            endChapter?: number;
+            startVerse: number; 
+            endVerse: number; 
+            endChapter?: number; 
         }> = [];
         if (!isEngineReady()) {
             return result;
@@ -175,40 +175,64 @@ export class ScriptureIndexer {
             });
         }
 
-        try {
-            const parsed = parseReferences(
-                processedContent,
-                fileLanguage,
-                this.outputLanguage,
-                this.nameFormat
-            );
-            if (!parsed) return result;
-            for (const entry of parsed) {
-                const ranges = entry[3] as string[][];
-                if (!ranges || ranges.length === 0) continue;
-                for (const range of ranges) {
-                    const startBcv = range[0];
-                    const endBcv = range[1];
-                    if (!startBcv || startBcv.length < 8) continue;
-                    if (!endBcv || endBcv.length < 8) continue;
-                    const bookId = parseInt(startBcv.substring(0, 2));
-                    const chapter = parseInt(startBcv.substring(2, 5));
-                    const startVerse = parseInt(startBcv.substring(5, 8));
-                    const endVerse = parseInt(endBcv.substring(5, 8));
-                    const endChapter = parseInt(endBcv.substring(2, 5));
-                    result.push({ 
-                        startBcv, 
-                        endBcv, 
-                        bookId, 
-                        chapter, 
-                        startVerse,
-                        endVerse,
-                        endChapter
-                    });
+        // Chunk large content (e.g. 2MB notes) to avoid WASM memory/stack exhaustion on large files
+        const CHUNK_SIZE = 40000;
+        const chunks: string[] = [];
+        if (processedContent.length > CHUNK_SIZE) {
+            const lines = processedContent.split('\n');
+            let currentChunk = '';
+            for (const line of lines) {
+                if (currentChunk.length + line.length > CHUNK_SIZE) {
+                    if (currentChunk.length > 0) {
+                        chunks.push(currentChunk);
+                        currentChunk = '';
+                    }
                 }
+                currentChunk += line + '\n';
             }
-        } catch (e) {
-            void this.plugin.getLogger()?.error('parseReferences error on content snippet', e);
+            if (currentChunk.length > 0) {
+                chunks.push(currentChunk);
+            }
+        } else {
+            chunks.push(processedContent);
+        }
+
+        for (const chunk of chunks) {
+            try {
+                const parsed = parseReferences(
+                    chunk,
+                    fileLanguage,
+                    this.outputLanguage,
+                    this.nameFormat
+                );
+                if (!parsed) continue;
+                for (const entry of parsed) {
+                    const ranges = entry[3] as string[][];
+                    if (!ranges || ranges.length === 0) continue;
+                    for (const range of ranges) {
+                        const startBcv = range[0];
+                        const endBcv = range[1];
+                        if (!startBcv || startBcv.length < 8) continue;
+                        if (!endBcv || endBcv.length < 8) continue;
+                        const bookId = parseInt(startBcv.substring(0, 2));
+                        const chapter = parseInt(startBcv.substring(2, 5));
+                        const startVerse = parseInt(startBcv.substring(5, 8));
+                        const endVerse = parseInt(endBcv.substring(5, 8));
+                        const endChapter = parseInt(endBcv.substring(2, 5));
+                        result.push({ 
+                            startBcv, 
+                            endBcv, 
+                            bookId, 
+                            chapter, 
+                            startVerse,
+                            endVerse,
+                            endChapter
+                        });
+                    }
+                }
+            } catch (e) {
+                void this.plugin.getLogger()?.error('parseReferences error on chunk', e);
+            }
         }
         return result;
     }
