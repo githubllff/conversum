@@ -274,7 +274,9 @@ export class ScriptureIndexer {
         const rangeKeys = this.db.getUnformattedRangeKeys(this.formattingBatchSize);
         if (rangeKeys.length === 0) {
             this.isFormatting = false;
-            await this.plugin.getLogger()?.log('Formatting completed');
+            await this.db.vacuum();
+            await this.db.saveToDisk();
+            await this.plugin.getLogger()?.log('Formatting completed and compacted to disk');
             this.plugin.refreshConcordanceView();
             this.plugin.refreshSettings();
             return;
@@ -302,7 +304,7 @@ export class ScriptureIndexer {
                 }
             }
             if (!this.formattingAbortRequested) {
-                await this.db.commitTransaction();
+                await this.db.commitTransaction(false);
             } else {
                 this.db.rollbackTransaction();
                 this.isFormatting = false;
@@ -353,17 +355,9 @@ export class ScriptureIndexer {
             onProgress?.(this.progress);
             await this.plugin.getLogger()?.log(`Starting rebuild: ${filteredFiles.length} markdown files to process`);
 
-            this.db.beginTransaction();
-            try {
-                this.db.clearAllData();
-                const newData = this.getEmptyData();
-                this.data = newData;
-                this.db.setData(newData);
-                await this.db.commitTransaction();
-            } catch (e) {
-                this.db.rollbackTransaction();
-                throw e;
-            }
+            // Cleanly reset SQLite database instance to avoid memory bloat
+            await this.db.resetDatabase();
+            this.data = this.getEmptyData();
 
             this.db.beginTransaction();
             const referenceMap = new Map<string, ReferenceIndexEntry>();
@@ -386,7 +380,7 @@ export class ScriptureIndexer {
                     await new Promise((resolve) => window.setTimeout(resolve, 0));
                 }
 
-                // Batch database transactions every 50 files to prevent unbounded memory growth
+                // Batch database in-memory transaction every 50 files
                 if (processedCount > 0 && processedCount % 50 === 0) {
                     try {
                         await this.db.commitTransaction(false);
@@ -469,11 +463,14 @@ export class ScriptureIndexer {
             this.data = newData;
             this.db.setData(newData);
 
-            await this.db.commitTransaction(true);
+            await this.db.commitTransaction(false);
 
             this.db.beginTransaction();
             this.db.cleanupOrphans();
-            await this.db.commitTransaction(true);
+            await this.db.commitTransaction(false);
+
+            await this.db.vacuum();
+            await this.db.saveToDisk();
 
             try {
                 this.plugin.settings.rebuildStatus = 'complete';
@@ -582,10 +579,10 @@ export class ScriptureIndexer {
                 };
                 this.data.lastUpdated = Date.now();
                 this.db.setData(this.data);
-                await this.db.commitTransaction();
+                await this.db.commitTransaction(true);
                 this.db.beginTransaction();
                 this.db.cleanupOrphans();
-                await this.db.commitTransaction();
+                await this.db.commitTransaction(true);
                 if (occurrences.length > 0 && !skipFormatting) {
                     this.startBackgroundFormatting();
                 }
@@ -630,7 +627,7 @@ export class ScriptureIndexer {
             this.db.setData(this.data);
             this.db.deleteFileReferences(filePath);
             this.db.cleanupOrphans();
-            await this.db.commitTransaction();
+            await this.db.commitTransaction(true);
         } catch (e) {
             this.db.rollbackTransaction();
             void this.plugin.getLogger()?.error(`Failed to remove file ${filePath}`, e);
@@ -670,7 +667,6 @@ export class ScriptureIndexer {
 
     setData(data: ConversumData): void {
         this.data = data;
-        this.db.setData(data);
     }
 
     getProgress(): IndexProgress {

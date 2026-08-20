@@ -121,14 +121,15 @@ export default class ConversumPlugin extends Plugin {
         const rebuildStatus = this.settings.rebuildStatus || 'unknown';
 
         if (rebuildStatus === 'in_progress' || rebuildStatus === 'failed' || rebuildStatus === 'aborted') {
-            await this.logger?.warn(`Previous index rebuild state: ${rebuildStatus}. Triggering recovery rebuild.`);
-            new Notice('Previous index rebuild was incomplete. Rebuilding...');
-            this.settings.rebuildStatus = 'in_progress';
+            await this.logger?.warn(`Previous index rebuild state was '${rebuildStatus}'. Resetting state.`);
+            this.settings.rebuildStatus = 'idle';
             await this.saveSettings();
-            this.app.workspace.onLayoutReady(async () => {
-                await new Promise(resolve => setTimeout(resolve, 500));
-                await this.syncIndexOnStartup();
-            });
+            if (this.settings.autoIndex) {
+                this.app.workspace.onLayoutReady(async () => {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    await this.syncIndexOnStartup();
+                });
+            }
             return;
         }
 

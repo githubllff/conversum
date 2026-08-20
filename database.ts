@@ -12,6 +12,7 @@ const DB_NAME = 'conversum-index.db';
 export class IndexDatabase {
     private plugin: ConversumPlugin;
     private db: SqlDatabase | null = null;
+    private SQL: any = null;
     private initialized = false;
     private data: ConversumData = {
         version: '',
@@ -32,7 +33,7 @@ export class IndexDatabase {
     async init(): Promise<void> {
         if (this.initialized) return;
         try {
-            const SQL = await initSqlJs({
+            this.SQL = await initSqlJs({
                 locateFile: () => {
                     return `data:application/wasm;base64,${SQL_WASM_BASE64}`;
                 }
@@ -50,7 +51,7 @@ export class IndexDatabase {
                 }
             } catch {
             }
-            this.db = dbData ? new SQL.Database(dbData) : new SQL.Database();
+            this.db = dbData ? new this.SQL.Database(dbData) : new this.SQL.Database();
             this.db.run('PRAGMA foreign_keys = ON;');
             this.createTables();
             this.cleanupOrphans();
@@ -59,6 +60,38 @@ export class IndexDatabase {
             await this.saveToDisk();
         } catch (e) {
             console.error('con[VER]sum: Failed to initialize SQLite:', e);
+            throw e;
+        }
+    }
+
+    async resetDatabase(): Promise<void> {
+        try {
+            if (this.inTransaction && this.db) {
+                this.rollbackTransaction();
+            }
+            if (this.db) {
+                try {
+                    this.db.close();
+                } catch {
+                }
+            }
+            if (!this.SQL) {
+                this.SQL = await initSqlJs({
+                    locateFile: () => `data:application/wasm;base64,${SQL_WASM_BASE64}`
+                });
+            }
+            this.db = new this.SQL.Database();
+            this.db.run('PRAGMA foreign_keys = ON;');
+            this.createTables();
+            this.data = {
+                version: this.plugin.manifest.version,
+                lastUpdated: 0,
+                references: {},
+                fileCache: {}
+            };
+            this.inTransaction = false;
+        } catch (e) {
+            console.error('con[VER]sum: Failed to reset database:', e);
             throw e;
         }
     }
@@ -94,16 +127,28 @@ export class IndexDatabase {
             )
         `);
         this.db.run(`
-            CREATE TABLE IF NOT EXISTS metadata (\n                key TEXT PRIMARY KEY,\n                value TEXT NOT NULL\n            )\n        `);
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        `);
 
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_detail_book_chapter \n            ON ref_detail (book_id, chapter)\n        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_detail_book_chapter 
+            ON ref_detail (book_id, chapter)
+        `);
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_detail_start_verse \n            ON ref_detail (start_verse)\n        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_detail_start_verse 
+            ON ref_detail (start_verse)
+        `);
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_occ_range_key \n            ON ref_occurrences (range_key)\n        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_occ_range_key 
+            ON ref_occurrences (range_key)
+        `);
         this.db.run(`
-            CREATE INDEX IF NOT EXISTS idx_ref_occ_file_path \n            ON ref_occurrences (file_path)\n        `);
+            CREATE INDEX IF NOT EXISTS idx_ref_occ_file_path 
+            ON ref_occurrences (file_path)
+        `);
     }
 
     private async loadDataFromDB(): Promise<void> {
@@ -217,6 +262,14 @@ export class IndexDatabase {
         }
     }
 
+    async vacuum(): Promise<void> {
+        if (!this.db || this.inTransaction) return;
+        try {
+            this.db.run('VACUUM');
+        } catch {
+        }
+    }
+
     async saveToDisk(): Promise<void> {
         if (!this.db) return;
         try {
@@ -252,7 +305,7 @@ export class IndexDatabase {
         this.inTransaction = true;
     }
 
-    async commitTransaction(save: boolean = true): Promise<void> {
+    async commitTransaction(save: boolean = false): Promise<void> {
         if (!this.db) {
             this.inTransaction = false;
             return;
