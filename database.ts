@@ -21,6 +21,7 @@ export class IndexDatabase {
         fileCache: {}
     };
     private inTransaction = false;
+    private saveInProgress: Promise<void> = Promise.resolve();
 
     constructor(plugin: ConversumPlugin) {
         this.plugin = plugin;
@@ -32,35 +33,116 @@ export class IndexDatabase {
 
     async init(): Promise<void> {
         if (this.initialized) return;
+        const adapter = this.plugin.app.vault.adapter;
+        const dir = '.obsidian/plugins/conversum';
+        const dbPath = `${dir}/${DB_NAME}`;
+        const backupPath = `${dir}/${DB_NAME}.bak`;
+
+        const ensureSql = async (): Promise<void> => {
+            if (!this.SQL) {
+                this.SQL = await initSqlJs({
+                    locateFile: () => {
+                        return `data:application/wasm;base64,${SQL_WASM_BASE64}`;
+                    }
+                });
+            }
+        };
+
         try {
-            this.SQL = await initSqlJs({
-                locateFile: () => {
-                    return `data:application/wasm;base64,${SQL_WASM_BASE64}`;
-                }
-            });
+            await ensureSql();
+
             let dbData: Uint8Array | null = null;
+            let loadedFromBackup = false;
+
             try {
-                const fileExists = await this.plugin.app.vault.adapter.exists(
-                    `.obsidian/plugins/conversum/${DB_NAME}`
-                );
+                const fileExists = await adapter.exists(dbPath);
                 if (fileExists) {
-                    const fileContent = await this.plugin.app.vault.adapter.readBinary(
-                        `.obsidian/plugins/conversum/${DB_NAME}`
-                    );
-                    dbData = new Uint8Array(fileContent);
+                    const fileContent = await adapter.readBinary(dbPath);
+                    const candidate = new Uint8Array(fileContent);
+                    try {
+                        const testDb = new this.SQL.Database(candidate);
+                        testDb.close();
+                        dbData = candidate;
+                    } catch (corruptErr) {
+                        console.warn('con[VER]sum: Primary database appears corrupt, attempting recovery', corruptErr);
+                        try {
+                            await adapter.rename(dbPath, `${dbPath}.corrupt.${Date.now()}`);
+                        } catch {
+                        }
+                        dbData = null;
+                    }
                 }
             } catch {
             }
+
+            if (!dbData) {
+                try {
+                    const backupExists = await adapter.exists(backupPath);
+                    if (backupExists) {
+                        const fileContent = await adapter.readBinary(backupPath);
+                        const candidate = new Uint8Array(fileContent);
+                        const testDb = new this.SQL.Database(candidate);
+                        testDb.close();
+                        dbData = candidate;
+                        loadedFromBackup = true;
+                    }
+                } catch {
+                    dbData = null;
+                }
+            }
+
             this.db = dbData ? new this.SQL.Database(dbData) : new this.SQL.Database();
-            this.db.run('PRAGMA foreign_keys = ON;');
+            this.db!.run('PRAGMA foreign_keys = ON;');
             this.createTables();
-            this.cleanupOrphans();
-            await this.loadDataFromDB();
+            try {
+                this.cleanupOrphans();
+            } catch {
+            }
+            try {
+                await this.loadDataFromDB();
+            } catch (loadErr) {
+                console.error('con[VER]sum: Failed to load data from database, resetting tables', loadErr);
+                try {
+                    this.db!.run('DELETE FROM ref_occurrences');
+                    this.db!.run('DELETE FROM ref_detail');
+                    this.db!.run('DELETE FROM file_index');
+                    this.db!.run('DELETE FROM metadata');
+                } catch {
+                }
+                this.data = {
+                    version: this.plugin.manifest.version,
+                    lastUpdated: 0,
+                    references: {},
+                    fileCache: {}
+                };
+            }
             this.initialized = true;
             await this.saveToDisk();
+            if (loadedFromBackup) {
+                console.log('con[VER]sum: Recovered database from backup copy');
+            }
         } catch (e) {
-            console.error('con[VER]sum: Failed to initialize SQLite:', e);
-            throw e;
+            console.error('con[VER]sum: Failed to initialize SQLite, creating fresh database:', e);
+            try {
+                await ensureSql();
+                if (this.db) {
+                    try { this.db.close(); } catch { }
+                }
+                this.db = new this.SQL.Database();
+                this.db!.run('PRAGMA foreign_keys = ON;');
+                this.createTables();
+                this.data = {
+                    version: this.plugin.manifest.version,
+                    lastUpdated: 0,
+                    references: {},
+                    fileCache: {}
+                };
+                this.initialized = true;
+                await this.saveToDisk();
+            } catch (e2) {
+                console.error('con[VER]sum: Critical failure initializing SQLite:', e2);
+                throw e2;
+            }
         }
     }
 
@@ -81,7 +163,7 @@ export class IndexDatabase {
                 });
             }
             this.db = new this.SQL.Database();
-            this.db.run('PRAGMA foreign_keys = ON;');
+            this.db!.run('PRAGMA foreign_keys = ON;');
             this.createTables();
             this.data = {
                 version: this.plugin.manifest.version,
@@ -270,26 +352,67 @@ export class IndexDatabase {
         }
     }
 
-    async saveToDisk(): Promise<void> {
+    private async doSaveToDisk(): Promise<void> {
         if (!this.db) return;
-        try {
-            this.db.run(
+        const adapter = this.plugin.app.vault.adapter;
+        const dir = '.obsidian/plugins/conversum';
+        const dbPath = `${dir}/${DB_NAME}`;
+        const tmpPath = `${dir}/${DB_NAME}.tmp`;
+        const backupPath = `${dir}/${DB_NAME}.bak`;
+
+        const writeMetadata = (): void => {
+            this.db!.run(
                 'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
                 ['version', this.data.version]
             );
-            this.db.run(
+            this.db!.run(
                 'INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)',
                 ['lastUpdated', String(this.data.lastUpdated)]
             );
+        };
+
+        try {
+            writeMetadata();
             const dbData = this.db.export();
-            await this.plugin.app.vault.adapter.writeBinary(
-                `.obsidian/plugins/conversum/${DB_NAME}`,
-                dbData as any
-            );
+
+            await adapter.writeBinary(tmpPath, dbData as any);
+
+            const mainExists = await adapter.exists(dbPath);
+            if (mainExists) {
+                if (await adapter.exists(backupPath)) {
+                    await adapter.remove(backupPath);
+                }
+                await adapter.rename(dbPath, backupPath);
+            }
+            await adapter.rename(tmpPath, dbPath);
+
+            if (await adapter.exists(backupPath)) {
+                await adapter.remove(backupPath);
+            }
         } catch (e) {
-            console.error('con[VER]sum: Failed to save database to disk:', e);
-            throw e;
+            console.error('con[VER]sum: Atomic save failed, attempting direct write:', e);
+            try {
+                if (!(await adapter.exists(dbPath)) && (await adapter.exists(backupPath))) {
+                    await adapter.rename(backupPath, dbPath);
+                }
+            } catch {
+            }
+            try {
+                writeMetadata();
+                const dbData = this.db.export();
+                await adapter.writeBinary(dbPath, dbData as any);
+            } catch (e2) {
+                console.error('con[VER]sum: Failed to save database to disk:', e2);
+            }
         }
+    }
+
+    async saveToDisk(): Promise<void> {
+        if (!this.db) return;
+        this.saveInProgress = this.saveInProgress
+            .catch(() => {})
+            .then(() => this.doSaveToDisk());
+        return this.saveInProgress;
     }
 
     // ============================================================

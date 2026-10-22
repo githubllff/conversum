@@ -44,7 +44,12 @@ export default class ConversumPlugin extends Plugin {
             await this.logger.error('Failed to initialize engine:', e);
             new Notice('con[VER]sum: Failed to initialize engine.');
         }
-        prewarmEngines(this.settings.sourceLanguage, this.settings.outputLanguage);
+        window.setTimeout(() => {
+            try {
+                prewarmEngines(this.settings.sourceLanguage, this.settings.outputLanguage);
+            } catch {
+            }
+        }, 1000);
 
         this.db = new IndexDatabase(this);
         await this.db.init();
@@ -122,7 +127,7 @@ export default class ConversumPlugin extends Plugin {
 
         if (rebuildStatus === 'in_progress' || rebuildStatus === 'failed' || rebuildStatus === 'aborted') {
             await this.logger?.warn(`Previous index rebuild state was '${rebuildStatus}'. Resetting state.`);
-            this.settings.rebuildStatus = 'idle';
+            this.settings.rebuildStatus = 'unknown';
             await this.saveSettings();
             if (this.settings.autoIndex) {
                 this.app.workspace.onLayoutReady(async () => {
@@ -188,11 +193,16 @@ export default class ConversumPlugin extends Plugin {
 
         if (filesToIndex.length > 0) {
             await this.logger?.log(`Startup sync: indexing ${filesToIndex.length} changed files`);
+            let syncCount = 0;
             for (const file of filesToIndex) {
                 try {
                     await this.indexer.updateFile(file, true);
                 } catch (e) {
                     await this.logger?.error(`Startup sync failed on ${file.path}`, e);
+                }
+                syncCount++;
+                if (syncCount % 5 === 0) {
+                    await new Promise((resolve) => window.setTimeout(resolve, 0));
                 }
             }
         }
@@ -376,21 +386,28 @@ export default class ConversumPlugin extends Plugin {
         }
 
         this.rebuildTimeout = window.setTimeout(async () => {
-            this.rebuildTimeout = null;
-            if (!this.indexer || this.indexer.isIndexingBusy()) return;
-            const filesToProcess = Array.from(this.pendingFiles);
-            this.pendingFiles.clear();
-
-            for (const f of filesToProcess) {
-                try {
-                    await this.indexer.updateFile(f, true);
-                } catch (e) {
-                    await this.logger?.error(`Failed to update file ${f.path}`, e);
+            const processPending = async (): Promise<void> => {
+                if (!this.indexer) return;
+                if (this.indexer.isIndexingBusy()) {
+                    this.rebuildTimeout = window.setTimeout(processPending, 2000);
+                    return;
                 }
-            }
-            this.indexer.startBackgroundFormatting();
-            this.refreshConcordanceView();
-            this.refreshSettings();
+                const filesToProcess = Array.from(this.pendingFiles);
+                this.pendingFiles.clear();
+                this.rebuildTimeout = null;
+
+                for (const f of filesToProcess) {
+                    try {
+                        await this.indexer.updateFile(f, true);
+                    } catch (e) {
+                        await this.logger?.error(`Failed to update file ${f.path}`, e);
+                    }
+                }
+                this.indexer.startBackgroundFormatting();
+                this.refreshConcordanceView();
+                this.refreshSettings();
+            };
+            await processPending();
         }, 1500);
     }
 

@@ -9,8 +9,7 @@
     "forceConsistentCasingInFileNames": true,
     "sourceMap": true,
     "allowSyntheticDefaultImports": true,
-    "verbatimModuleSyntax": false,
-    "ignoreDeprecations": "6.0"
+    "verbatimModuleSyntax": false
   },
   "include": ["*.ts"]
 }

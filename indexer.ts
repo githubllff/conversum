@@ -138,7 +138,7 @@ export class ScriptureIndexer {
         return content;
     }
 
-    private parseFileReferences(content: string): Array<{ 
+    private async parseFileReferences(content: string): Promise<Array<{ 
         startBcv: string; 
         endBcv: string; 
         bookId: number; 
@@ -146,7 +146,7 @@ export class ScriptureIndexer {
         startVerse: number;
         endVerse: number;
         endChapter?: number;
-    }> {
+    }>> {
         const result: Array<{ 
             startBcv: string; 
             endBcv: string; 
@@ -175,29 +175,38 @@ export class ScriptureIndexer {
             });
         }
 
-        // Chunk large content (e.g. 2MB notes) to avoid WASM memory/stack exhaustion on large files
-        const CHUNK_SIZE = 40000;
+        const CHUNK_SIZE = 12000;
         const chunks: string[] = [];
-        if (processedContent.length > CHUNK_SIZE) {
-            const lines = processedContent.split('\n');
-            let currentChunk = '';
-            for (const line of lines) {
-                if (currentChunk.length + line.length > CHUNK_SIZE) {
-                    if (currentChunk.length > 0) {
-                        chunks.push(currentChunk);
-                        currentChunk = '';
-                    }
+        const lines = processedContent.split('\n');
+        let currentChunk = '';
+        for (const line of lines) {
+            if (line.length > CHUNK_SIZE) {
+                if (currentChunk.length > 0) {
+                    chunks.push(currentChunk);
+                    currentChunk = '';
                 }
-                currentChunk += line + '\n';
+                for (let i = 0; i < line.length; i += CHUNK_SIZE) {
+                    chunks.push(line.slice(i, i + CHUNK_SIZE));
+                }
+                continue;
             }
-            if (currentChunk.length > 0) {
-                chunks.push(currentChunk);
+            if (currentChunk.length + line.length + 1 > CHUNK_SIZE) {
+                if (currentChunk.length > 0) {
+                    chunks.push(currentChunk);
+                }
+                currentChunk = '';
             }
-        } else {
+            currentChunk += line + '\n';
+        }
+        if (currentChunk.length > 0) {
+            chunks.push(currentChunk);
+        }
+        if (chunks.length === 0) {
             chunks.push(processedContent);
         }
 
-        for (const chunk of chunks) {
+        for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
             try {
                 const parsed = parseReferences(
                     chunk,
@@ -232,6 +241,9 @@ export class ScriptureIndexer {
                 }
             } catch (e) {
                 void this.plugin.getLogger()?.error('parseReferences error on chunk', e);
+            }
+            if (i < chunks.length - 1) {
+                await new Promise((resolve) => window.setTimeout(resolve, 0));
             }
         }
         return result;
@@ -399,13 +411,11 @@ export class ScriptureIndexer {
                 }
                 this.progress.currentFile = file.path;
 
-                // Yield to event loop frequently (every 10 files) to keep UI responsive
-                if (processedCount > 0 && processedCount % 10 === 0) {
+                if (processedCount > 0 && processedCount % 5 === 0) {
                     await new Promise((resolve) => window.setTimeout(resolve, 0));
                 }
 
-                // Batch database in-memory transaction every 50 files
-                if (processedCount > 0 && processedCount % 50 === 0) {
+                if (processedCount > 0 && processedCount % 25 === 0) {
                     try {
                         await this.db.commitTransaction(false);
                         this.db.beginTransaction();
@@ -418,7 +428,7 @@ export class ScriptureIndexer {
                 try {
                     const content = await this.vault.read(file);
                     const fileLanguage = this.getFileLanguage(content);
-                    const occurrences = this.parseFileReferences(content);
+                    const occurrences = await this.parseFileReferences(content);
                     const fileRefs: string[] = [];
                     if (occurrences.length > 0) {
                         for (const occ of occurrences) {
@@ -536,7 +546,12 @@ export class ScriptureIndexer {
             }
             const fileLanguage = this.getFileLanguage(content);
             this.isIndexing = true;
-            this.db.beginTransaction();
+            try {
+                this.db.beginTransaction();
+            } catch {
+                this.isIndexing = false;
+                return;
+            }
             try {
                 if (cached) {
                     for (const key of cached.references) {
@@ -554,7 +569,7 @@ export class ScriptureIndexer {
                     }
                 }
                 this.db.deleteFileReferences(file.path);
-                const occurrences = this.parseFileReferences(content);
+                const occurrences = await this.parseFileReferences(content);
                 const fileRefs: string[] = [];
                 for (const occ of occurrences) {
                     const key = getRangeKey(occ.startBcv, occ.endBcv);
@@ -616,7 +631,8 @@ export class ScriptureIndexer {
             } finally {
                 this.isIndexing = false;
             }
-        } catch {
+        } catch (e) {
+            void this.plugin.getLogger()?.error(`Failed to update file ${file.path}`, e);
         }
     }
 

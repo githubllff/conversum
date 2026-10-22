@@ -2593,8 +2593,8 @@ var engine_bg_default = __toBinary("AGFzbQEAAAAB8wIqYAN/f38Bf2ACf38Bf2ACf38AYAF/
 // engine-wrapper.ts
 var engineInitialized = false;
 var enginePool = /* @__PURE__ */ new Map();
-function getEngineKey(language, format) {
-  return `${language}|${format}`;
+function clearEnginePool() {
+  enginePool.clear();
 }
 async function initEngine() {
   if (engineInitialized) return;
@@ -2606,12 +2606,15 @@ async function initEngine() {
     throw e;
   }
 }
-function getOrCreateEngine(language, format = "full") {
-  if (!engineInitialized) {
-    console.error("con[VER]sum: Engine not initialized");
-    return null;
+function prewarmEngines(sourceLanguage, outputLanguage) {
+  if (!engineInitialized) return;
+  const formats = ["full", "standard", "official"];
+  for (const format of formats) {
+    getOrCreateEngine(sourceLanguage, outputLanguage, format);
   }
-  const key = getEngineKey(language, format);
+}
+function getOrCreateEngine(language, outputLanguage, format) {
+  const key = `${language}-${outputLanguage}-${format}`;
   if (enginePool.has(key)) {
     return enginePool.get(key);
   }
@@ -2623,21 +2626,28 @@ function getOrCreateEngine(language, format = "full") {
     return null;
   }
 }
-function prewarmEngines(sourceLanguage, outputLanguage) {
-  if (!engineInitialized) return;
-  getOrCreateEngine(sourceLanguage, "full");
-  getOrCreateEngine(outputLanguage, "full");
-  getOrCreateEngine(outputLanguage, "standard");
-  getOrCreateEngine(outputLanguage, "official");
-}
-function clearEnginePool() {
-  enginePool.clear();
-}
-function getParsingEngine(sourceLanguage) {
-  return getOrCreateEngine(sourceLanguage, "full");
-}
-function getDecodingEngine(outputLanguage, nameFormat = "full") {
-  return getOrCreateEngine(outputLanguage, nameFormat);
+function isWholeBookReference(startBcv, endBcv) {
+  if (!startBcv || !endBcv || startBcv.length < 8 || endBcv.length < 8) {
+    return false;
+  }
+  const startBook = parseInt(startBcv.substring(0, 2));
+  const endBook = parseInt(endBcv.substring(0, 2));
+  if (startBook !== endBook) {
+    return false;
+  }
+  const startChapter = parseInt(startBcv.substring(2, 5));
+  const startVerse = parseInt(startBcv.substring(5, 8));
+  if (startChapter !== 1 || startVerse !== 1) {
+    return false;
+  }
+  const endChapter = parseInt(endBcv.substring(2, 5));
+  const endVerse = parseInt(endBcv.substring(5, 8));
+  const totalChapters = getChapterCount(startBook);
+  if (endChapter !== totalChapters) {
+    return false;
+  }
+  const lastChapterVerses = getVerseCount(startBook, totalChapters);
+  return endVerse === lastChapterVerses;
 }
 function isEngineReady() {
   return engineInitialized;
@@ -2662,19 +2672,6 @@ function getVerseCount(bookId, chapter) {
     return 1;
   }
 }
-function isWholeBookReference(startBcv, endBcv) {
-  const bookId = parseInt(startBcv.substring(0, 2));
-  const startChapter = parseInt(startBcv.substring(2, 5));
-  const startVerse = parseInt(startBcv.substring(5, 8));
-  const endChapter = parseInt(endBcv.substring(2, 5));
-  const endVerse = parseInt(endBcv.substring(5, 8));
-  if (startChapter !== 1 || startVerse !== 1) return false;
-  const lastChapter = getChapterCount(bookId);
-  if (lastChapter === 0) return false;
-  if (endChapter !== lastChapter) return false;
-  const lastVerse = getVerseCount(bookId, lastChapter);
-  return endVerse === lastVerse;
-}
 function getBookName(bookNumber, langCode, format = "full", capitalize = false) {
   if (!engineInitialized) {
     return "";
@@ -2693,12 +2690,11 @@ function getAvailableLanguages() {
     const json = TravertureEngine.get_available_languages();
     const parsed = JSON.parse(json);
     return parsed.filter((lang) => lang.code !== "ase" && lang.language_code !== "ase").map((lang) => ({
-      language_code: lang.language_code || lang.code,
-      language_symbol: lang.language_symbol || lang.symbol,
-      language_name: lang.language_name || lang.vernacularName || lang.languageName,
-      english_name: lang.english_name || lang.englishName,
-      code: lang.language_code || lang.code,
-      symbol: lang.language_symbol || lang.symbol,
+      code: lang.code || lang.language_code,
+      language_code: lang.code || lang.language_code,
+      suffix: lang.symbol || lang.suffix || "",
+      language_name: lang.vernacular_name || lang.language_name || lang.vernacularName || lang.languageName,
+      vernacular_name: lang.vernacular_name || lang.language_name || lang.vernacularName || lang.languageName,
       vernacularName: lang.language_name || lang.vernacularName || lang.languageName,
       englishName: lang.english_name || lang.englishName
     }));
@@ -2707,47 +2703,48 @@ function getAvailableLanguages() {
   }
 }
 function resolveLanguage(input) {
-  const languages = getAvailableLanguages();
-  if (languages.length === 0) return null;
-  if (!input || typeof input !== "string") return null;
-  const cleanInput = input.trim().replace(/^["']|["']$/g, "").toLowerCase();
-  for (const lang of languages) {
-    if (lang.language_code && lang.language_code.toLowerCase() === cleanInput) {
-      return lang.language_code;
-    }
-    if (lang.language_symbol && lang.language_symbol.toLowerCase() === cleanInput) {
-      return lang.language_code;
-    }
-    if (lang.language_name && lang.language_name.toLowerCase() === cleanInput) {
-      return lang.language_code;
-    }
-    if (lang.english_name && lang.english_name.toLowerCase() === cleanInput) {
-      return lang.language_code;
-    }
-  }
+  if (!input) return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const available = getAvailableLanguages();
+  const lower = trimmed.toLowerCase();
+  const byCode = available.find((l) => l.code.toLowerCase() === lower);
+  if (byCode) return byCode.code;
+  const byName = available.find((l) => l.language_name.toLowerCase() === lower);
+  if (byName) return byName.code;
+  const byEnglish = available.find((l) => l.englishName && l.englishName.toLowerCase() === lower);
+  if (byEnglish) return byEnglish.code;
   return null;
 }
 function parseReferences(text, sourceLanguage, outputLanguage, nameFormat = "full", capitalize = false) {
+  if (!text || text.trim().length === 0) return [];
   const resolvedSource = resolveLanguage(sourceLanguage) || sourceLanguage;
-  const engine = getParsingEngine(resolvedSource);
+  const key = `${resolvedSource}-${outputLanguage}-${nameFormat}`;
+  let engine = getOrCreateEngine(resolvedSource, outputLanguage, nameFormat);
   if (!engine) return null;
   try {
     const result = engine.parse(resolvedSource, outputLanguage, nameFormat, capitalize, text);
     return JSON.parse(result);
   } catch {
-    return null;
+    enginePool.delete(key);
+    try {
+      const freshEngine = new TravertureEngine(resolvedSource, resolvedSource, nameFormat, false);
+      enginePool.set(key, freshEngine);
+      const retryResult = freshEngine.parse(resolvedSource, outputLanguage, nameFormat, capitalize, text);
+      return JSON.parse(retryResult);
+    } catch {
+      return null;
+    }
   }
 }
 function decodeScriptures(ranges, outputLanguage, nameFormat = "full") {
-  const resolvedOutput = resolveLanguage(outputLanguage) || outputLanguage;
-  const engine = getDecodingEngine(resolvedOutput, nameFormat);
+  const engine = getOrCreateEngine(outputLanguage, outputLanguage, nameFormat);
   if (!engine) return null;
   try {
-    const json = JSON.stringify(ranges);
-    const result = engine.decode_scriptures(json);
+    const rangesJson = JSON.stringify(ranges);
+    const result = engine.decode(outputLanguage, nameFormat, rangesJson);
     return JSON.parse(result);
-  } catch (e) {
-    console.error("con[VER]sum: Failed to decode scriptures:", e);
+  } catch {
     return null;
   }
 }
@@ -2767,6 +2764,7 @@ var DB_NAME = "conversum-index.db";
 var IndexDatabase = class {
   constructor(plugin) {
     this.db = null;
+    this.SQL = null;
     this.initialized = false;
     this.data = {
       version: "",
@@ -2775,6 +2773,7 @@ var IndexDatabase = class {
       fileCache: {}
     };
     this.inTransaction = false;
+    this.saveInProgress = Promise.resolve();
     this.plugin = plugin;
   }
   // ============================================================
@@ -2782,35 +2781,143 @@ var IndexDatabase = class {
   // ============================================================
   async init() {
     if (this.initialized) return;
+    const adapter = this.plugin.app.vault.adapter;
+    const dir = ".obsidian/plugins/conversum";
+    const dbPath = `${dir}/${DB_NAME}`;
+    const backupPath = `${dir}/${DB_NAME}.bak`;
+    const ensureSql = async () => {
+      if (!this.SQL) {
+        this.SQL = await (0, import_sql.default)({
+          locateFile: () => {
+            return `data:application/wasm;base64,${SQL_WASM_BASE64}`;
+          }
+        });
+      }
+    };
     try {
-      const SQL = await (0, import_sql.default)({
-        locateFile: (file) => {
-          return `data:application/wasm;base64,${SQL_WASM_BASE64}`;
-        }
-      });
+      await ensureSql();
       let dbData = null;
+      let loadedFromBackup = false;
       try {
-        const configDir = this.plugin.app.vault.configDir;
-        const fileExists = await this.plugin.app.vault.adapter.exists(
-          `${configDir}/plugins/conversum/${DB_NAME}`
-        );
+        const fileExists = await adapter.exists(dbPath);
         if (fileExists) {
-          const fileContent = await this.plugin.app.vault.adapter.readBinary(
-            `${configDir}/plugins/conversum/${DB_NAME}`
-          );
-          dbData = new Uint8Array(fileContent);
+          const fileContent = await adapter.readBinary(dbPath);
+          const candidate = new Uint8Array(fileContent);
+          try {
+            const testDb = new this.SQL.Database(candidate);
+            testDb.close();
+            dbData = candidate;
+          } catch (corruptErr) {
+            console.warn("con[VER]sum: Primary database appears corrupt, attempting recovery", corruptErr);
+            try {
+              await adapter.rename(dbPath, `${dbPath}.corrupt.${Date.now()}`);
+            } catch {
+            }
+            dbData = null;
+          }
         }
       } catch {
       }
-      this.db = dbData ? new SQL.Database(dbData) : new SQL.Database();
+      if (!dbData) {
+        try {
+          const backupExists = await adapter.exists(backupPath);
+          if (backupExists) {
+            const fileContent = await adapter.readBinary(backupPath);
+            const candidate = new Uint8Array(fileContent);
+            const testDb = new this.SQL.Database(candidate);
+            testDb.close();
+            dbData = candidate;
+            loadedFromBackup = true;
+          }
+        } catch {
+          dbData = null;
+        }
+      }
+      this.db = dbData ? new this.SQL.Database(dbData) : new this.SQL.Database();
       this.db.run("PRAGMA foreign_keys = ON;");
       this.createTables();
-      this.cleanupOrphans();
-      await this.loadDataFromDB();
+      try {
+        this.cleanupOrphans();
+      } catch {
+      }
+      try {
+        await this.loadDataFromDB();
+      } catch (loadErr) {
+        console.error("con[VER]sum: Failed to load data from database, resetting tables", loadErr);
+        try {
+          this.db.run("DELETE FROM ref_occurrences");
+          this.db.run("DELETE FROM ref_detail");
+          this.db.run("DELETE FROM file_index");
+          this.db.run("DELETE FROM metadata");
+        } catch {
+        }
+        this.data = {
+          version: this.plugin.manifest.version,
+          lastUpdated: 0,
+          references: {},
+          fileCache: {}
+        };
+      }
       this.initialized = true;
       await this.saveToDisk();
+      if (loadedFromBackup) {
+        console.log("con[VER]sum: Recovered database from backup copy");
+      }
     } catch (e) {
-      console.error("con[VER]sum: Failed to initialize SQLite:", e);
+      console.error("con[VER]sum: Failed to initialize SQLite, creating fresh database:", e);
+      try {
+        await ensureSql();
+        if (this.db) {
+          try {
+            this.db.close();
+          } catch {
+          }
+        }
+        this.db = new this.SQL.Database();
+        this.db.run("PRAGMA foreign_keys = ON;");
+        this.createTables();
+        this.data = {
+          version: this.plugin.manifest.version,
+          lastUpdated: 0,
+          references: {},
+          fileCache: {}
+        };
+        this.initialized = true;
+        await this.saveToDisk();
+      } catch (e2) {
+        console.error("con[VER]sum: Critical failure initializing SQLite:", e2);
+        throw e2;
+      }
+    }
+  }
+  async resetDatabase() {
+    try {
+      if (this.inTransaction && this.db) {
+        this.rollbackTransaction();
+      }
+      if (this.db) {
+        try {
+          this.db.close();
+        } catch {
+        }
+      }
+      if (!this.SQL) {
+        this.SQL = await (0, import_sql.default)({
+          locateFile: () => `data:application/wasm;base64,${SQL_WASM_BASE64}`
+        });
+      }
+      this.db = new this.SQL.Database();
+      this.db.run("PRAGMA foreign_keys = ON;");
+      this.createTables();
+      this.data = {
+        version: this.plugin.manifest.version,
+        lastUpdated: 0,
+        references: {},
+        fileCache: {}
+      };
+      this.inTransaction = false;
+    } catch (e) {
+      console.error("con[VER]sum: Failed to reset database:", e);
       throw e;
     }
   }
@@ -2945,7 +3052,7 @@ var IndexDatabase = class {
           const currentCount = data.occurrenceCounts.get(filePath) || 0;
           data.occurrenceCounts.set(filePath, currentCount + 1);
         }
-        for (const [, data] of refMap) {
+        for (const [rangeKey, data] of refMap) {
           const files = [];
           let totalOccurrences = 0;
           for (const [filePath, count] of data.occurrenceCounts) {
@@ -2955,12 +3062,11 @@ var IndexDatabase = class {
           files.sort((a, b) => a.path.localeCompare(b.path));
           data.entry.files = files;
           data.entry.totalOccurrences = totalOccurrences;
-          this.data.references[data.entry.startBcv + "-" + data.entry.endBcv] = data.entry;
+          this.data.references[rangeKey] = data.entry;
           for (const filePath of data.filePaths) {
-            const key = data.entry.startBcv + "-" + data.entry.endBcv;
             if (this.data.fileCache[filePath]) {
-              if (!this.data.fileCache[filePath].references.includes(key)) {
-                this.data.fileCache[filePath].references.push(key);
+              if (!this.data.fileCache[filePath].references.includes(rangeKey)) {
+                this.data.fileCache[filePath].references.push(rangeKey);
               }
             }
           }
@@ -2971,9 +3077,21 @@ var IndexDatabase = class {
       throw e;
     }
   }
-  async saveToDisk() {
-    if (!this.db) return;
+  async vacuum() {
+    if (!this.db || this.inTransaction) return;
     try {
+      this.db.run("VACUUM");
+    } catch {
+    }
+  }
+  async doSaveToDisk() {
+    if (!this.db) return;
+    const adapter = this.plugin.app.vault.adapter;
+    const dir = ".obsidian/plugins/conversum";
+    const dbPath = `${dir}/${DB_NAME}`;
+    const tmpPath = `${dir}/${DB_NAME}.tmp`;
+    const backupPath = `${dir}/${DB_NAME}.bak`;
+    const writeMetadata = () => {
       this.db.run(
         "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
         ["version", this.data.version]
@@ -2982,16 +3100,44 @@ var IndexDatabase = class {
         "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
         ["lastUpdated", String(this.data.lastUpdated)]
       );
+    };
+    try {
+      writeMetadata();
       const dbData = this.db.export();
-      const configDir = this.plugin.app.vault.configDir;
-      await this.plugin.app.vault.adapter.writeBinary(
-        `${configDir}/plugins/conversum/${DB_NAME}`,
-        dbData
-      );
+      await adapter.writeBinary(tmpPath, dbData);
+      const mainExists = await adapter.exists(dbPath);
+      if (mainExists) {
+        if (await adapter.exists(backupPath)) {
+          await adapter.remove(backupPath);
+        }
+        await adapter.rename(dbPath, backupPath);
+      }
+      await adapter.rename(tmpPath, dbPath);
+      if (await adapter.exists(backupPath)) {
+        await adapter.remove(backupPath);
+      }
     } catch (e) {
-      console.error("con[VER]sum: Failed to save database to disk:", e);
-      throw e;
+      console.error("con[VER]sum: Atomic save failed, attempting direct write:", e);
+      try {
+        if (!await adapter.exists(dbPath) && await adapter.exists(backupPath)) {
+          await adapter.rename(backupPath, dbPath);
+        }
+      } catch {
+      }
+      try {
+        writeMetadata();
+        const dbData = this.db.export();
+        await adapter.writeBinary(dbPath, dbData);
+      } catch (e2) {
+        console.error("con[VER]sum: Failed to save database to disk:", e2);
+      }
     }
+  }
+  async saveToDisk() {
+    if (!this.db) return;
+    this.saveInProgress = this.saveInProgress.catch(() => {
+    }).then(() => this.doSaveToDisk());
+    return this.saveInProgress;
   }
   // ============================================================
   // TRANSACTION MANAGEMENT
@@ -2999,25 +3145,25 @@ var IndexDatabase = class {
   beginTransaction() {
     if (!this.db) return;
     if (this.inTransaction) {
-      console.warn("con[VER]sum: Transaction already in progress");
       return;
     }
     this.db.run("BEGIN TRANSACTION");
     this.inTransaction = true;
   }
-  async commitTransaction() {
+  async commitTransaction(save = false) {
     if (!this.db) {
       this.inTransaction = false;
       return;
     }
     if (!this.inTransaction) {
-      console.warn("con[VER]sum: No transaction to commit");
       return;
     }
     try {
       this.db.run("COMMIT");
       this.inTransaction = false;
-      await this.saveToDisk();
+      if (save) {
+        await this.saveToDisk();
+      }
     } catch (e) {
       this.inTransaction = false;
       console.error("con[VER]sum: Failed to commit transaction:", e);
@@ -3030,7 +3176,6 @@ var IndexDatabase = class {
       return;
     }
     if (!this.inTransaction) {
-      console.warn("con[VER]sum: No transaction to rollback");
       return;
     }
     try {
@@ -3199,69 +3344,63 @@ var IndexDatabase = class {
   // ============================================================
   insertOccurrence(rangeKey, filePath, startBcv, endBcv, bookId, chapter, startVerse, endVerse, endChapter) {
     if (!this.db) return;
-    if (!this.inTransaction) {
-      console.warn("con[VER]sum: insertOccurrence called outside transaction");
+    try {
+      this.db.run(`
+                INSERT OR IGNORE INTO ref_detail (
+                    range_key, start_bcv, end_bcv, book_id, chapter,
+                    start_verse, end_verse, end_chapter, formatted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            `, [
+        rangeKey,
+        startBcv,
+        endBcv,
+        bookId,
+        chapter,
+        startVerse,
+        endVerse,
+        endChapter || null
+      ]);
+      this.db.run(`
+                INSERT INTO ref_occurrences (range_key, file_path)
+                VALUES (?, ?)
+            `, [rangeKey, filePath]);
+    } catch (e) {
+      console.error(`con[VER]sum: Error inserting occurrence ${rangeKey}:`, e);
     }
-    const detailStmt = this.db.prepare(`
-            INSERT OR IGNORE INTO ref_detail (
-                range_key, start_bcv, end_bcv, book_id, chapter,
-                start_verse, end_verse, end_chapter, formatted
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-        `);
-    detailStmt.run([
-      rangeKey,
-      startBcv,
-      endBcv,
-      bookId,
-      chapter,
-      startVerse,
-      endVerse,
-      endChapter || null
-    ]);
-    detailStmt.free();
-    const occStmt = this.db.prepare(`
-            INSERT INTO ref_occurrences (range_key, file_path)
-            VALUES (?, ?)
-        `);
-    occStmt.run([rangeKey, filePath]);
-    occStmt.free();
   }
   upsertFileIndex(filePath, lastModified, language) {
     if (!this.db) return;
-    if (!this.inTransaction) {
-      console.warn("con[VER]sum: upsertFileIndex called outside transaction");
+    try {
+      this.db.run(`
+                INSERT OR REPLACE INTO file_index (file_path, last_modified, language)
+                VALUES (?, ?, ?)
+            `, [filePath, lastModified, language || null]);
+    } catch (e) {
+      console.error(`con[VER]sum: Error upserting file index ${filePath}:`, e);
     }
-    const stmt = this.db.prepare(`
-            INSERT OR REPLACE INTO file_index (file_path, last_modified, language)
-            VALUES (?, ?, ?)
-        `);
-    stmt.run([filePath, lastModified, language || null]);
-    stmt.free();
   }
   deleteFileReferences(filePath) {
     if (!this.db) return;
-    if (!this.inTransaction) {
-      console.warn("con[VER]sum: deleteFileReferences called outside transaction");
+    try {
+      this.db.run(`
+                DELETE FROM ref_occurrences WHERE file_path = ?
+            `, [filePath]);
+      this.cleanupOrphans();
+    } catch (e) {
+      console.error(`con[VER]sum: Error deleting file references ${filePath}:`, e);
     }
-    const stmt = this.db.prepare(`
-            DELETE FROM ref_occurrences WHERE file_path = ?
-        `);
-    stmt.run([filePath]);
-    stmt.free();
-    this.cleanupOrphans();
   }
   updateFormatted(rangeKey, formatted) {
     if (!this.db) return;
-    if (!this.inTransaction) {
-      console.warn("con[VER]sum: updateFormatted called outside transaction");
+    try {
+      this.db.run(`
+                UPDATE ref_detail 
+                SET formatted = ? 
+                WHERE range_key = ?
+            `, [formatted, rangeKey]);
+    } catch (e) {
+      console.error(`con[VER]sum: Error updating formatted ${rangeKey}:`, e);
     }
-    const stmt = this.db.prepare(`
-            UPDATE ref_detail 
-            SET formatted = ? 
-            WHERE range_key = ?
-        `);
-    stmt.run([formatted, rangeKey]);
-    stmt.free();
   }
   cleanupOrphans() {
     if (!this.db) return;
@@ -3270,12 +3409,10 @@ var IndexDatabase = class {
       this.db.run("BEGIN TRANSACTION");
     }
     try {
-      const stmt = this.db.prepare(`
+      this.db.run(`
                 DELETE FROM ref_detail 
                 WHERE range_key NOT IN (SELECT DISTINCT range_key FROM ref_occurrences)
             `);
-      stmt.run([]);
-      stmt.free();
       if (!wasInTransaction) {
         this.db.run("COMMIT");
       }
@@ -3288,19 +3425,20 @@ var IndexDatabase = class {
   }
   clearAllData() {
     if (!this.db) return;
-    if (!this.inTransaction) {
-      console.warn("con[VER]sum: clearAllData called outside transaction");
+    try {
+      this.db.run("DELETE FROM ref_occurrences");
+      this.db.run("DELETE FROM ref_detail");
+      this.db.run("DELETE FROM file_index");
+      this.db.run("DELETE FROM metadata");
+      this.data = {
+        version: this.data.version,
+        lastUpdated: 0,
+        references: {},
+        fileCache: {}
+      };
+    } catch (e) {
+      console.error("con[VER]sum: Error clearing all data:", e);
     }
-    this.db.run("DELETE FROM ref_occurrences");
-    this.db.run("DELETE FROM ref_detail");
-    this.db.run("DELETE FROM file_index");
-    this.db.run("DELETE FROM metadata");
-    this.data = {
-      version: this.data.version,
-      lastUpdated: 0,
-      references: {},
-      fileCache: {}
-    };
   }
   // ============================================================
   // SEARCH & QUERY OPERATIONS
@@ -3378,7 +3516,7 @@ var IndexDatabase = class {
         results.push([rangeKey, entry]);
       }
       return results;
-    } catch {
+    } catch (e) {
       return Object.entries(this.data.references);
     }
   }
@@ -3446,7 +3584,7 @@ var IndexDatabase = class {
         entry.files.push({ path: filePath, occurrences: count });
         entry.totalOccurrences += count;
       }
-      for (const [rangeKey, data] of entryMap) {
+      for (const [, data] of entryMap) {
         const { bookId, chapter, startBcv, endBcv, startVerse, endVerse, endChapter, formatted, files, totalOccurrences, displayChapter } = data;
         const entry = {
           startBcv,
@@ -3463,10 +3601,10 @@ var IndexDatabase = class {
         if (!bookMap.has(groupChapter)) {
           bookMap.set(groupChapter, []);
         }
-        bookMap.get(groupChapter).push([rangeKey, entry, formatted]);
+        bookMap.get(groupChapter).push([data.startBcv + "-" + data.endBcv, entry, formatted]);
       }
       return grouped;
-    } catch {
+    } catch (e) {
       return grouped;
     }
   }
@@ -3545,19 +3683,7 @@ var IndexDatabase = class {
         totalOccurrences
       };
       return entry;
-    } catch {
-      const startBook = parseInt(startBcv.substring(0, 2));
-      const startChapter = parseInt(startBcv.substring(2, 5));
-      const startVerse = parseInt(startBcv.substring(5, 8));
-      for (const [, entry] of Object.entries(this.data.references)) {
-        const entryStartBook = parseInt(entry.startBcv.substring(0, 2));
-        const entryStartChapter = parseInt(entry.startBcv.substring(2, 5));
-        const entryStartVerse = parseInt(entry.startBcv.substring(5, 8));
-        const entryEndVerse = parseInt(entry.endBcv.substring(5, 8));
-        if (entryStartBook === startBook && entryStartChapter === startChapter && startVerse >= entryStartVerse && startVerse <= entryEndVerse) {
-          return entry;
-        }
-      }
+    } catch (e) {
       return null;
     }
   }
@@ -3594,13 +3720,15 @@ var IndexDatabase = class {
     if (this.db) {
       if (this.inTransaction) {
         try {
-          await this.commitTransaction();
-        } catch (e) {
-          console.warn("con[VER]sum: Failed to commit transaction on close:", e);
+          await this.commitTransaction(true);
+        } catch {
           this.rollbackTransaction();
         }
       }
-      this.db.run("VACUUM");
+      try {
+        this.db.run("VACUUM");
+      } catch {
+      }
       await this.saveToDisk();
       this.db.close();
       this.db = null;
@@ -3627,8 +3755,8 @@ var ScriptureIndexer = class {
     this.isFormatting = false;
     this.formattingAbortRequested = false;
     this.formattingTimeout = null;
-    this.formattingBatchSize = 50;
-    this.formattingDelayMs = 200;
+    this.formattingBatchSize = 100;
+    this.formattingDelayMs = 150;
     this.vault = vault;
     this.plugin = plugin;
     this.sourceLanguage = sourceLanguage;
@@ -3651,19 +3779,22 @@ var ScriptureIndexer = class {
     };
   }
   isExcluded(filePath) {
-    const configDir = this.plugin.app.vault.configDir;
-    const hardcodedExclusions = ["_templates", "_attachments", configDir];
+    const hardcodedExclusions = ["_templates", "_attachments", ".obsidian"];
+    const normalizedPath = filePath.replace(/\\/g, "/");
     for (const folder of hardcodedExclusions) {
-      if (filePath.startsWith(folder + "/") || filePath === folder) {
+      const clean = folder.replace(/^\/+|\/+$/g, "");
+      if (normalizedPath === clean || normalizedPath.startsWith(clean + "/")) {
         return true;
       }
     }
     for (const folder of this.excludedFolders) {
-      if (filePath.startsWith(folder + "/") || filePath === folder) {
+      const clean = folder.trim().replace(/^\/+|\/+$/g, "");
+      if (!clean) continue;
+      if (normalizedPath === clean || normalizedPath.startsWith(clean + "/")) {
         return true;
       }
     }
-    if (filePath.startsWith("Concordance-") && filePath.endsWith(".md")) {
+    if (normalizedPath.startsWith("Concordance-") && normalizedPath.endsWith(".md")) {
       return true;
     }
     return false;
@@ -3675,7 +3806,8 @@ var ScriptureIndexer = class {
     const frontmatterText = content.substring(3, endIndex).trim();
     const result = {};
     for (const line of frontmatterText.split("\n")) {
-      const match = line.match(/^([^:]+):\s*(.+)$/);
+      const cleanLine = line.replace(/\r/g, "");
+      const match = cleanLine.match(/^([^:]+):\s*(.+)$/);
       if (match) {
         const key = match[1].trim().toLowerCase();
         let value = match[2].trim();
@@ -3706,7 +3838,7 @@ var ScriptureIndexer = class {
     }
     return content;
   }
-  parseFileReferences(content) {
+  async parseFileReferences(content) {
     const result = [];
     if (!isEngineReady()) {
       return result;
@@ -3724,39 +3856,75 @@ var ScriptureIndexer = class {
         return "\u27EA\u27EA" + cleaned + "\u27EB\u27EB";
       });
     }
-    try {
-      const parsed = parseReferences(
-        processedContent,
-        fileLanguage,
-        this.outputLanguage,
-        this.nameFormat
-      );
-      if (!parsed) return result;
-      for (const entry of parsed) {
-        const ranges = entry[3];
-        if (!ranges || ranges.length === 0) continue;
-        for (const range of ranges) {
-          const startBcv = range[0];
-          const endBcv = range[1];
-          if (!startBcv || startBcv.length < 8) continue;
-          if (!endBcv || endBcv.length < 8) continue;
-          const bookId = parseInt(startBcv.substring(0, 2));
-          const chapter = parseInt(startBcv.substring(2, 5));
-          const startVerse = parseInt(startBcv.substring(5, 8));
-          const endVerse = parseInt(endBcv.substring(5, 8));
-          const endChapter = parseInt(endBcv.substring(2, 5));
-          result.push({
-            startBcv,
-            endBcv,
-            bookId,
-            chapter,
-            startVerse,
-            endVerse,
-            endChapter
-          });
+    const CHUNK_SIZE = 12e3;
+    const chunks = [];
+    const lines = processedContent.split("\n");
+    let currentChunk = "";
+    for (const line of lines) {
+      if (line.length > CHUNK_SIZE) {
+        if (currentChunk.length > 0) {
+          chunks.push(currentChunk);
+          currentChunk = "";
         }
+        for (let i = 0; i < line.length; i += CHUNK_SIZE) {
+          chunks.push(line.slice(i, i + CHUNK_SIZE));
+        }
+        continue;
       }
-    } catch {
+      if (currentChunk.length + line.length + 1 > CHUNK_SIZE) {
+        if (currentChunk.length > 0) {
+          chunks.push(currentChunk);
+        }
+        currentChunk = "";
+      }
+      currentChunk += line + "\n";
+    }
+    if (currentChunk.length > 0) {
+      chunks.push(currentChunk);
+    }
+    if (chunks.length === 0) {
+      chunks.push(processedContent);
+    }
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      try {
+        const parsed = parseReferences(
+          chunk,
+          fileLanguage,
+          this.outputLanguage,
+          this.nameFormat
+        );
+        if (!parsed) continue;
+        for (const entry of parsed) {
+          const ranges = entry[3];
+          if (!ranges || ranges.length === 0) continue;
+          for (const range of ranges) {
+            const startBcv = range[0];
+            const endBcv = range[1];
+            if (!startBcv || startBcv.length < 8) continue;
+            if (!endBcv || endBcv.length < 8) continue;
+            const bookId = parseInt(startBcv.substring(0, 2));
+            const chapter = parseInt(startBcv.substring(2, 5));
+            const startVerse = parseInt(startBcv.substring(5, 8));
+            const endVerse = parseInt(endBcv.substring(5, 8));
+            const endChapter = parseInt(endBcv.substring(2, 5));
+            result.push({
+              startBcv,
+              endBcv,
+              bookId,
+              chapter,
+              startVerse,
+              endVerse,
+              endChapter
+            });
+          }
+        }
+      } catch (e) {
+        void this.plugin.getLogger()?.error("parseReferences error on chunk", e);
+      }
+      if (i < chunks.length - 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
     }
     return result;
   }
@@ -3777,7 +3945,7 @@ var ScriptureIndexer = class {
   abortFormatting() {
     this.formattingAbortRequested = true;
     if (this.formattingTimeout) {
-      window.clearTimeout(this.formattingTimeout);
+      clearTimeout(this.formattingTimeout);
       this.formattingTimeout = null;
     }
     this.isFormatting = false;
@@ -3785,13 +3953,13 @@ var ScriptureIndexer = class {
   startBackgroundFormatting() {
     if (this.isFormatting) {
       this.abortFormatting();
-      window.setTimeout(() => {
+      setTimeout(() => {
         this.startBackgroundFormatting();
       }, 50);
       return;
     }
     if (this.isIndexing) {
-      window.setTimeout(() => {
+      setTimeout(() => {
         this.startBackgroundFormatting();
       }, 5e3);
       return;
@@ -3817,6 +3985,9 @@ var ScriptureIndexer = class {
     const rangeKeys = this.db.getUnformattedRangeKeys(this.formattingBatchSize);
     if (rangeKeys.length === 0) {
       this.isFormatting = false;
+      await this.db.vacuum();
+      await this.db.saveToDisk();
+      await this.plugin.getLogger()?.log("Formatting completed and compacted to disk");
       this.plugin.refreshConcordanceView();
       this.plugin.refreshSettings();
       return;
@@ -3827,9 +3998,7 @@ var ScriptureIndexer = class {
         if (this.formattingAbortRequested) break;
         try {
           const data = this.db.getOccurrenceData(rangeKey);
-          if (!data) {
-            continue;
-          }
+          if (!data) continue;
           const ranges = [[
             `${String(data.bookId).padStart(2, "0")}${String(data.chapter).padStart(3, "0")}${String(data.startVerse).padStart(3, "0")}`,
             `${String(data.bookId).padStart(2, "0")}${String(data.endChapter !== void 0 && data.endChapter !== data.chapter ? data.endChapter : data.chapter).padStart(3, "0")}${String(data.endVerse).padStart(3, "0")}`
@@ -3841,11 +4010,12 @@ var ScriptureIndexer = class {
           );
           const formatted = decoded && decoded.length > 0 ? decoded[0] : `${data.startBcv}-${data.endBcv}`;
           this.db.updateFormatted(rangeKey, formatted);
-        } catch {
+        } catch (err) {
+          void this.plugin.getLogger()?.error(`Error formatting rangeKey ${rangeKey}`, err);
         }
       }
       if (!this.formattingAbortRequested) {
-        await this.db.commitTransaction();
+        await this.db.commitTransaction(false);
       } else {
         this.db.rollbackTransaction();
         this.isFormatting = false;
@@ -3856,9 +4026,10 @@ var ScriptureIndexer = class {
       this.formattingTimeout = window.setTimeout(() => {
         this.formatBatch();
       }, this.formattingDelayMs);
-    } catch {
+    } catch (e) {
       this.db.rollbackTransaction();
       this.isFormatting = false;
+      void this.plugin.getLogger()?.error("formatBatch transaction failed", e);
       this.plugin.refreshSettings();
     }
   }
@@ -3870,7 +4041,7 @@ var ScriptureIndexer = class {
   // ============================================================
   async rebuildIndex(onProgress) {
     if (this.isIndexing) {
-      console.warn("con[VER]sum: Indexing already in progress");
+      await this.plugin.getLogger()?.warn("Index rebuild requested while indexing already in progress");
       return this.data;
     }
     this.isIndexing = true;
@@ -3890,17 +4061,9 @@ var ScriptureIndexer = class {
       this.progress.totalFiles = filteredFiles.length;
       this.progress.status = "processing";
       onProgress?.(this.progress);
-      this.db.beginTransaction();
-      try {
-        this.db.clearAllData();
-        const newData2 = this.getEmptyData();
-        this.data = newData2;
-        this.db.setData(newData2);
-        await this.db.commitTransaction();
-      } catch (e) {
-        this.db.rollbackTransaction();
-        throw e;
-      }
+      await this.plugin.getLogger()?.log(`Starting rebuild: ${filteredFiles.length} markdown files to process`);
+      await this.db.resetDatabase();
+      this.data = this.getEmptyData();
       this.db.beginTransaction();
       const referenceMap = /* @__PURE__ */ new Map();
       const fileCache = {};
@@ -3911,13 +4074,26 @@ var ScriptureIndexer = class {
           this.db.rollbackTransaction();
           this.progress.status = "idle";
           this.isIndexing = false;
+          await this.plugin.getLogger()?.warn("Index rebuild aborted by user");
           return this.data;
         }
         this.progress.currentFile = file.path;
+        if (processedCount > 0 && processedCount % 5 === 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+        }
+        if (processedCount > 0 && processedCount % 25 === 0) {
+          try {
+            await this.db.commitTransaction(false);
+            this.db.beginTransaction();
+            await this.plugin.getLogger()?.log(`Progress: ${processedCount}/${filteredFiles.length} files (${this.progress.referencesFound} occurrences, ${uniqueRefs.size} unique refs)`);
+          } catch (e) {
+            await this.plugin.getLogger()?.error(`Checkpoint commit failed at file ${file.path}`, e);
+          }
+        }
         try {
           const content = await this.vault.read(file);
           const fileLanguage = this.getFileLanguage(content);
-          const occurrences = this.parseFileReferences(content);
+          const occurrences = await this.parseFileReferences(content);
           const fileRefs = [];
           if (occurrences.length > 0) {
             for (const occ of occurrences) {
@@ -3970,7 +4146,7 @@ var ScriptureIndexer = class {
             lastModified: file.stat.mtime
           };
         } catch (e) {
-          console.error(`con[VER]sum: Error processing ${file.path}:`, e);
+          await this.plugin.getLogger()?.error(`Error processing file ${file.path}`, e);
         }
         processedCount++;
         this.progress.processedFiles = processedCount;
@@ -3984,15 +4160,18 @@ var ScriptureIndexer = class {
       newData.version = this.pluginVersion;
       this.data = newData;
       this.db.setData(newData);
-      await this.db.commitTransaction();
+      await this.db.commitTransaction(false);
       this.db.beginTransaction();
       this.db.cleanupOrphans();
-      await this.db.commitTransaction();
+      await this.db.commitTransaction(false);
+      await this.db.vacuum();
+      await this.db.saveToDisk();
       try {
         this.plugin.settings.rebuildStatus = "complete";
         await this.plugin.saveSettings();
       } catch {
       }
+      await this.plugin.getLogger()?.log(`Index rebuild complete: ${Object.keys(newData.references).length} unique references indexed`);
       this.progress.status = "complete";
       this.progress.currentFile = void 0;
       onProgress?.(this.progress);
@@ -4006,7 +4185,7 @@ var ScriptureIndexer = class {
       } catch {
       }
       this.progress.status = "error";
-      console.error("con[VER]sum: Index rebuild failed:", e);
+      await this.plugin.getLogger()?.error("Index rebuild failed with critical exception", e);
       throw e;
     } finally {
       this.isIndexing = false;
@@ -4025,7 +4204,12 @@ var ScriptureIndexer = class {
       }
       const fileLanguage = this.getFileLanguage(content);
       this.isIndexing = true;
-      this.db.beginTransaction();
+      try {
+        this.db.beginTransaction();
+      } catch {
+        this.isIndexing = false;
+        return;
+      }
       try {
         if (cached) {
           for (const key of cached.references) {
@@ -4043,7 +4227,7 @@ var ScriptureIndexer = class {
           }
         }
         this.db.deleteFileReferences(file.path);
-        const occurrences = this.parseFileReferences(content);
+        const occurrences = await this.parseFileReferences(content);
         const fileRefs = [];
         for (const occ of occurrences) {
           const key = getRangeKey(occ.startBcv, occ.endBcv);
@@ -4092,10 +4276,10 @@ var ScriptureIndexer = class {
         };
         this.data.lastUpdated = Date.now();
         this.db.setData(this.data);
-        await this.db.commitTransaction();
+        await this.db.commitTransaction(true);
         this.db.beginTransaction();
         this.db.cleanupOrphans();
-        await this.db.commitTransaction();
+        await this.db.commitTransaction(true);
         if (occurrences.length > 0 && !skipFormatting) {
           this.startBackgroundFormatting();
         }
@@ -4105,7 +4289,8 @@ var ScriptureIndexer = class {
       } finally {
         this.isIndexing = false;
       }
-    } catch {
+    } catch (e) {
+      void this.plugin.getLogger()?.error(`Failed to update file ${file.path}`, e);
     }
   }
   async removeFile(filePath) {
@@ -4139,21 +4324,26 @@ var ScriptureIndexer = class {
       this.db.setData(this.data);
       this.db.deleteFileReferences(filePath);
       this.db.cleanupOrphans();
-      await this.db.commitTransaction();
+      await this.db.commitTransaction(true);
     } catch (e) {
       this.db.rollbackTransaction();
-      console.error(`con[VER]sum: Failed to remove file ${filePath}:`, e);
+      void this.plugin.getLogger()?.error(`Failed to remove file ${filePath}`, e);
     }
   }
   async rebuildAllHTML() {
     const rangeKeys = this.db.getAllRangeKeys();
+    let successCount = 0;
+    let failCount = 0;
     this.db.beginTransaction();
     try {
       for (const rangeKey of rangeKeys) {
         try {
           const formatted = this.db.getFormatted(rangeKey);
           if (!formatted) continue;
+          this.db.getFilesWithCounts(rangeKey);
+          successCount++;
         } catch {
+          failCount++;
         }
       }
       await this.db.commitTransaction();
@@ -4170,7 +4360,6 @@ var ScriptureIndexer = class {
   }
   setData(data) {
     this.data = data;
-    this.db.setData(data);
   }
   getProgress() {
     return { ...this.progress };
@@ -4189,8 +4378,9 @@ var ScriptureIndexer = class {
     this.nameFormat = nameFormat;
     this.excludedFolders = excludedFolders;
     if (outputChanged) {
-      void this.clearFormatted().then(() => {
+      this.clearFormatted().then(() => {
         this.startBackgroundFormatting();
+      }).catch(() => {
       });
     }
   }
@@ -4237,6 +4427,70 @@ var ScriptureIndexer = class {
   }
   findReferencesContainingRange(startBcv, endBcv) {
     return this.db.findReferencesContainingRange(startBcv, endBcv);
+  }
+};
+
+// logger.ts
+var ConversumLogger = class {
+  // 1 MB
+  constructor(app) {
+    this.logPath = ".obsidian/plugins/conversum/conversum.log";
+    this.maxLogSize = 1024 * 1024;
+    this.app = app;
+  }
+  async init() {
+    try {
+      const exists = await this.app.vault.adapter.exists(this.logPath);
+      if (exists) {
+        const stat = await this.app.vault.adapter.stat(this.logPath);
+        if (stat && stat.size > this.maxLogSize) {
+          await this.app.vault.adapter.write(this.logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] [INFO] Log rotated
+`);
+        }
+      } else {
+        await this.app.vault.adapter.write(this.logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] [INFO] conversum log initialized
+`);
+      }
+    } catch (e) {
+      console.error("con[VER]sum: Failed to init logfile:", e);
+    }
+  }
+  async log(message) {
+    const timestamp = (/* @__PURE__ */ new Date()).toISOString();
+    const line = `[${timestamp}] [INFO] ${message}
+`;
+    console.log(`con[VER]sum: ${message}`);
+    await this.appendToFile(line);
+  }
+  async warn(message) {
+    const timestamp = (/* @__PURE__ */ new Date()).toISOString();
+    const line = `[${timestamp}] [WARN] ${message}
+`;
+    console.warn(`con[VER]sum: ${message}`);
+    await this.appendToFile(line);
+  }
+  async error(message, error) {
+    const timestamp = (/* @__PURE__ */ new Date()).toISOString();
+    let errStr = "";
+    if (error) {
+      errStr = error instanceof Error ? ` | ${error.message}
+${error.stack}` : ` | ${JSON.stringify(error)}`;
+    }
+    const line = `[${timestamp}] [ERROR] ${message}${errStr}
+`;
+    console.error(`con[VER]sum: ${message}`, error);
+    await this.appendToFile(line);
+  }
+  async appendToFile(text) {
+    try {
+      const exists = await this.app.vault.adapter.exists(this.logPath);
+      if (exists) {
+        await this.app.vault.adapter.append(this.logPath, text);
+      } else {
+        await this.app.vault.adapter.write(this.logPath, text);
+      }
+    } catch {
+    }
   }
 };
 
@@ -5335,8 +5589,10 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
     super(...arguments);
     this.indexer = null;
     this.db = null;
+    this.logger = null;
     this.rebuildTimeout = null;
     this.fileWatcherEnabled = false;
+    this.pendingFiles = /* @__PURE__ */ new Set();
     this.relatedPopout = null;
     this.isStartupComplete = false;
     this.settingsTab = null;
@@ -5344,15 +5600,27 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
   getDatabase() {
     return this.db;
   }
+  getLogger() {
+    return this.logger;
+  }
   async onload() {
+    this.logger = new ConversumLogger(this.app);
+    await this.logger.init();
+    await this.logger.log("Plugin initializing...");
     await this.loadSettings();
     try {
       await initEngine();
+      await this.logger.log("WASM Engine successfully initialized");
     } catch (e) {
-      console.error("con[VER]sum: Failed to initialize engine:", e);
+      await this.logger.error("Failed to initialize engine:", e);
       new import_obsidian4.Notice("con[VER]sum: Failed to initialize engine.");
     }
-    prewarmEngines(this.settings.sourceLanguage, this.settings.outputLanguage);
+    window.setTimeout(() => {
+      try {
+        prewarmEngines(this.settings.sourceLanguage, this.settings.outputLanguage);
+      } catch {
+      }
+    }, 1e3);
     this.db = new IndexDatabase(this);
     await this.db.init();
     this.initIndexer();
@@ -5363,18 +5631,19 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
     this.addCommands();
     this.registerEvents();
     this.addRibbonIcon("book-open", "con[VER]sum Concordance", () => {
-      void this.openConcordanceView();
+      this.openConcordanceView();
     });
     await this.handleStartup();
     if (this.settings.autoIndex) {
       this.startFileWatcher();
     }
     this.isStartupComplete = true;
+    await this.logger.log("Plugin loaded and ready");
   }
-  onunload() {
+  async onunload() {
     this.stopFileWatcher();
     if (this.rebuildTimeout) {
-      window.clearTimeout(this.rebuildTimeout);
+      clearTimeout(this.rebuildTimeout);
       this.rebuildTimeout = null;
     }
     if (this.relatedPopout) {
@@ -5383,10 +5652,10 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
     }
     clearEnginePool();
     if (this.db) {
-      void this.db.close().then(() => {
-        this.db = null;
-      });
+      await this.db.close();
+      this.db = null;
     }
+    await this.logger?.log("Plugin unloaded");
   }
   transformForcedReferences(text) {
     if (!text.includes("{{")) return text;
@@ -5412,13 +5681,15 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
     const hasValidData = data && data.references && Object.keys(data.references).length > 0;
     const rebuildStatus = this.settings.rebuildStatus || "unknown";
     if (rebuildStatus === "in_progress" || rebuildStatus === "failed" || rebuildStatus === "aborted") {
-      new import_obsidian4.Notice("Previous index rebuild was incomplete. Rebuilding...");
-      this.settings.rebuildStatus = "in_progress";
+      await this.logger?.warn(`Previous index rebuild state was '${rebuildStatus}'. Resetting state.`);
+      this.settings.rebuildStatus = "unknown";
       await this.saveSettings();
-      this.app.workspace.onLayoutReady(async () => {
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
-        await this.syncIndexOnStartup();
-      });
+      if (this.settings.autoIndex) {
+        this.app.workspace.onLayoutReady(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await this.syncIndexOnStartup();
+        });
+      }
       return;
     }
     if (hasValidData && this.settings.autoIndex) {
@@ -5467,28 +5738,30 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
       }
     }
     if (filesToIndex.length > 0) {
+      await this.logger?.log(`Startup sync: indexing ${filesToIndex.length} changed files`);
+      let syncCount = 0;
       for (const file of filesToIndex) {
         try {
           await this.indexer.updateFile(file, true);
-        } catch {
+        } catch (e) {
+          await this.logger?.error(`Startup sync failed on ${file.path}`, e);
+        }
+        syncCount++;
+        if (syncCount % 5 === 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
         }
       }
     }
     const freshData = this.db.getData();
     const freshFileCache = freshData.fileCache || {};
-    let removedCount = 0;
     for (const cachedPath of Object.keys(freshFileCache)) {
       if (!vaultPaths.has(cachedPath)) {
         await this.indexer.removeFile(cachedPath);
-        removedCount++;
       }
-    }
-    if (removedCount > 0) {
     }
     const unformattedCount = this.db.getUnformattedCount();
     if (unformattedCount > 0) {
       this.indexer.startBackgroundFormatting();
-    } else {
     }
     this.refreshConcordanceView();
     this.refreshSettings();
@@ -5581,12 +5854,13 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
       await this.indexer.rebuildIndex(progressCallback);
       const data = this.indexer.getData();
       notice.setMessage(`Index complete: ${data ? Object.keys(data.references).length : 0} unique references`);
-      window.setTimeout(() => notice.hide(), 2e3);
+      setTimeout(() => notice.hide(), 2e3);
       this.refreshConcordanceView();
       this.refreshSettings();
-    } catch {
-      notice.setMessage("Index rebuild failed. See console for details.");
-      window.setTimeout(() => notice.hide(), 3e3);
+    } catch (e) {
+      await this.logger?.error("Manual rebuild failed", e);
+      notice.setMessage("Index rebuild failed. See conversum.log for details.");
+      setTimeout(() => notice.hide(), 3e3);
     }
   }
   formatReferenceOnTheFly(entry) {
@@ -5616,33 +5890,43 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
   }
   stopFileWatcher() {
     this.fileWatcherEnabled = false;
+    this.pendingFiles.clear();
     if (this.rebuildTimeout) {
-      window.clearTimeout(this.rebuildTimeout);
+      clearTimeout(this.rebuildTimeout);
       this.rebuildTimeout = null;
     }
   }
   scheduleIndexUpdate(file) {
     if (!this.settings.autoIndex || !this.fileWatcherEnabled) return;
     if (!this.indexer) return;
-    if (this.indexer.isIndexingBusy()) return;
-    for (const folder of this.settings.excludedFolders) {
-      if (file.path.startsWith(folder + "/") || file.path === folder) {
-        return;
-      }
-    }
+    if (this.indexer.isExcluded(file.path)) return;
+    this.pendingFiles.add(file);
     if (this.rebuildTimeout) {
-      window.clearTimeout(this.rebuildTimeout);
+      clearTimeout(this.rebuildTimeout);
     }
     this.rebuildTimeout = window.setTimeout(async () => {
-      this.rebuildTimeout = null;
-      if (!this.indexer || this.indexer.isIndexingBusy()) return;
-      try {
-        await this.indexer.updateFile(file);
+      const processPending = async () => {
+        if (!this.indexer) return;
+        if (this.indexer.isIndexingBusy()) {
+          this.rebuildTimeout = window.setTimeout(processPending, 2e3);
+          return;
+        }
+        const filesToProcess = Array.from(this.pendingFiles);
+        this.pendingFiles.clear();
+        this.rebuildTimeout = null;
+        for (const f of filesToProcess) {
+          try {
+            await this.indexer.updateFile(f, true);
+          } catch (e) {
+            await this.logger?.error(`Failed to update file ${f.path}`, e);
+          }
+        }
+        this.indexer.startBackgroundFormatting();
         this.refreshConcordanceView();
         this.refreshSettings();
-      } catch {
-      }
-    }, 5e3);
+      };
+      await processPending();
+    }, 1500);
   }
   // ============================================================
   // EVENTS
@@ -5668,7 +5952,7 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
       this.app.vault.on("rename", (file, oldPath) => {
         if (file instanceof import_obsidian4.TFile && file.extension === "md") {
           if (this.indexer && this.isStartupComplete) {
-            void this.indexer.removeFile(oldPath);
+            this.indexer.removeFile(oldPath);
             this.scheduleIndexUpdate(file);
           }
         }
@@ -5678,7 +5962,7 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
       this.app.vault.on("delete", (file) => {
         if (file instanceof import_obsidian4.TFile && file.extension === "md") {
           if (this.indexer && this.isStartupComplete) {
-            void this.indexer.removeFile(file.path);
+            this.indexer.removeFile(file.path);
             this.refreshConcordanceView();
             this.refreshSettings();
           }
@@ -5703,15 +5987,10 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
           );
           if (parsed && parsed.length > 0) {
             const cursorCh = cursor.ch;
-            const isForced = line.includes("{{") && line.includes("}}");
             for (const entry of parsed) {
-              let startPos = entry[1];
-              let endPos = entry[2];
-              if (isForced) {
-                startPos += 2;
-                endPos += 2;
-              }
-              if (cursorCh >= startPos && cursorCh < endPos) {
+              const startPos = entry[1];
+              const endPos = entry[2];
+              if (cursorCh > startPos && cursorCh < endPos) {
                 hasReference = true;
                 matchedEntry = entry;
                 break;
@@ -5725,7 +6004,7 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
           submenu.addItem((subItem) => {
             subItem.setTitle("Open concordance").setIcon("book-open");
             subItem.onClick(() => {
-              void this.openConcordanceView();
+              this.openConcordanceView();
             });
           });
           if (hasReference && matchedEntry) {
@@ -5759,14 +6038,14 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
         this.showReadingModeMenu(evt, null);
         return;
       }
-      const position = activeDocument.caretPositionFromPoint(evt.clientX, evt.clientY);
+      const range = activeDocument.caretRangeFromPoint(evt.clientX, evt.clientY);
       let isAtEnd = false;
-      if (position) {
-        const container = position.offsetNode;
-        const offset = position.offset;
-        if (container && container.nodeType === Node.TEXT_NODE) {
+      if (range) {
+        const container = range.startContainer;
+        if (container.nodeType === Node.TEXT_NODE) {
           const textNode = container;
           const text = textNode.textContent || "";
+          const offset = range.startOffset;
           if (offset >= text.length) {
             let nextSibling = textNode.nextSibling;
             let hasTextAfter = false;
@@ -5802,11 +6081,10 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
         const dataBcv = linkEl.getAttribute("data-bcv");
         const linkText = linkEl.textContent || "";
         if (dataBcv) {
-          const displayText = linkEl.textContent || "";
           const rangeKey = `${dataBcv}-${dataBcv}`;
           const entry = this.indexer?.getReference(rangeKey);
           if (entry) {
-            const refData = [[displayText, 0, displayText.length, [[dataBcv, dataBcv]]]];
+            const refData = [[linkText, 0, linkText.length, [[dataBcv, dataBcv]]]];
             this.showReadingModeMenu(evt, refData);
           } else {
             this.showReadingModeMenu(evt, null);
@@ -5826,9 +6104,9 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
           textToParse = linkText;
         }
       } else {
-        if (position) {
-          const container = position.offsetNode;
-          if (container && container.nodeType === Node.TEXT_NODE) {
+        if (range && range.startContainer) {
+          const container = range.startContainer;
+          if (container.nodeType === Node.TEXT_NODE) {
             const textNode = container;
             const fullText = textNode.textContent || "";
             const forceMatch = fullText.match(/\{\{(.+?)\}\}/);
@@ -5879,17 +6157,17 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
       submenu.addItem((subItem) => {
         subItem.setTitle("Open concordance").setIcon("book-open");
         subItem.onClick(() => {
-          void this.openConcordanceView();
+          this.openConcordanceView();
         });
       });
       if (parsed && parsed.length > 0) {
-        const position = activeDocument.caretPositionFromPoint(evt.clientX, evt.clientY);
+        const range = activeDocument.caretRangeFromPoint(evt.clientX, evt.clientY);
         let isOnRef = false;
-        if (position) {
-          const node = position.offsetNode;
-          const offset = position.offset;
-          if (node && node.nodeType === Node.TEXT_NODE) {
+        if (range) {
+          const node = range.startContainer;
+          if (node.nodeType === Node.TEXT_NODE) {
             const text = node.textContent || "";
+            const offset = range.startOffset;
             const refText = parsed[0][0];
             const cleanText = text.replace(/\{\{|\}\}/g, "");
             if (cleanText.includes(refText)) {
@@ -5902,12 +6180,14 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
                 isOnRef = true;
               }
             }
-          } else if (node && node.nodeType === Node.ELEMENT_NODE) {
-            const parent = node;
-            const text = parent.textContent || "";
-            const refText = parsed[0][0];
-            if (text.includes(refText)) {
-              isOnRef = true;
+          } else {
+            const parent = node.parentElement;
+            if (parent) {
+              const text = parent.textContent || "";
+              const refText = parsed[0][0];
+              if (text.includes(refText)) {
+                isOnRef = true;
+              }
             }
           }
         }
@@ -5941,7 +6221,7 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
       id: "open-concordance",
       name: "Open concordance",
       icon: "book-open",
-      callback: () => void this.openConcordanceView()
+      callback: () => this.openConcordanceView()
     });
   }
   // ============================================================
@@ -6160,8 +6440,9 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
       const file = await this.app.vault.create(filePath, content);
       await this.app.workspace.openLinkText(file.path, "");
       new import_obsidian4.Notice(`Concordance exported: ${fileName}`);
-    } catch {
-      new import_obsidian4.Notice("Export failed. See console for details.");
+    } catch (e) {
+      await this.logger?.error("Export concordance failed", e);
+      new import_obsidian4.Notice("Export failed. See console or log for details.");
     }
   }
   generateConcordanceContent(data) {
@@ -6218,7 +6499,7 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
         const fileEntries = [];
         for (const file of sortedFiles) {
           const fileName = file.path.replace(/\.md$/, "");
-          fileEntries.push(`[[${fileName}]]\u2009(${file.occurrences})`);
+          fileEntries.push(`[[${fileName}]] (${file.occurrences})`);
         }
         lines.push(`**${formattedRef}** \u2014 ${fileEntries.join("; ")}`);
       }
@@ -6227,7 +6508,7 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
     }
     lines.push("---");
     lines.push("");
-    lines.push(`*Generated by \`con[VER]sum v${this.manifest.version}\`*`);
+    lines.push("*Generated by `con[VER]sum v" + this.manifest.version + "`*");
     return lines.join("\n");
   }
 };
