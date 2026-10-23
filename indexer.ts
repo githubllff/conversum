@@ -428,6 +428,8 @@ export class ScriptureIndexer {
                 try {
                     const content = await this.vault.read(file);
                     const fileLanguage = this.getFileLanguage(content);
+                    // Ensure file_index row exists before inserting occurrences (FK constraint).
+                    this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
                     const occurrences = await this.parseFileReferences(content);
                     const fileRefs: string[] = [];
                     if (occurrences.length > 0) {
@@ -568,6 +570,7 @@ export class ScriptureIndexer {
                         }
                     }
                 }
+                this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
                 this.db.deleteFileReferences(file.path);
                 const occurrences = await this.parseFileReferences(content);
                 const fileRefs: string[] = [];

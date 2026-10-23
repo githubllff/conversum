@@ -4093,6 +4093,7 @@ var ScriptureIndexer = class {
         try {
           const content = await this.vault.read(file);
           const fileLanguage = this.getFileLanguage(content);
+          this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
           const occurrences = await this.parseFileReferences(content);
           const fileRefs = [];
           if (occurrences.length > 0) {
@@ -4226,6 +4227,7 @@ var ScriptureIndexer = class {
             }
           }
         }
+        this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
         this.db.deleteFileReferences(file.path);
         const occurrences = await this.parseFileReferences(content);
         const fileRefs = [];
