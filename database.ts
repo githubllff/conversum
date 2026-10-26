@@ -352,6 +352,16 @@ export class IndexDatabase {
         }
     }
 
+    private ensureForeignKeys(): void {
+        if (!this.db) return;
+        try {
+            // sql.js resets PRAGMA foreign_keys to OFF after db.export(),
+            // so it must be re-enabled after every export.
+            this.db.run('PRAGMA foreign_keys = ON;');
+        } catch {
+        }
+    }
+
     private async doSaveToDisk(): Promise<void> {
         if (!this.db) return;
         const adapter = this.plugin.app.vault.adapter;
@@ -374,6 +384,7 @@ export class IndexDatabase {
         try {
             writeMetadata();
             const dbData = this.db.export();
+            this.ensureForeignKeys();
 
             await adapter.writeBinary(tmpPath, dbData as any);
 
@@ -400,6 +411,7 @@ export class IndexDatabase {
             try {
                 writeMetadata();
                 const dbData = this.db.export();
+                this.ensureForeignKeys();
                 await adapter.writeBinary(dbPath, dbData as any);
             } catch (e2) {
                 console.error('con[VER]sum: Failed to save database to disk:', e2);

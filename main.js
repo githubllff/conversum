@@ -3084,6 +3084,13 @@ var IndexDatabase = class {
     } catch {
     }
   }
+  ensureForeignKeys() {
+    if (!this.db) return;
+    try {
+      this.db.run("PRAGMA foreign_keys = ON;");
+    } catch {
+    }
+  }
   async doSaveToDisk() {
     if (!this.db) return;
     const adapter = this.plugin.app.vault.adapter;
@@ -3104,6 +3111,7 @@ var IndexDatabase = class {
     try {
       writeMetadata();
       const dbData = this.db.export();
+      this.ensureForeignKeys();
       await adapter.writeBinary(tmpPath, dbData);
       const mainExists = await adapter.exists(dbPath);
       if (mainExists) {
@@ -3127,6 +3135,7 @@ var IndexDatabase = class {
       try {
         writeMetadata();
         const dbData = this.db.export();
+        this.ensureForeignKeys();
         await adapter.writeBinary(dbPath, dbData);
       } catch (e2) {
         console.error("con[VER]sum: Failed to save database to disk:", e2);
