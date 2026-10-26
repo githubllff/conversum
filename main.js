@@ -5701,6 +5701,17 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
     if (!this.indexer || !this.db) {
       return;
     }
+    const dbRefCount = this.db.getReferenceCount();
+    const dbOccurrenceCount = this.db.getOccurrenceCount();
+    const dbFileCount = this.db.getFileCount();
+    await this.logger?.log(
+      `Loaded index from disk: ${dbRefCount} refs, ${dbOccurrenceCount} occurrences, ${dbFileCount} files`
+    );
+    if (dbFileCount > 100 && dbOccurrenceCount < dbFileCount) {
+      await this.logger?.warn(
+        `Index looks incomplete (${dbOccurrenceCount} occurrences for ${dbFileCount} indexed files). Run "Rebuild index" to repair it.`
+      );
+    }
     const data = this.db.getData();
     const hasValidData = data && data.references && Object.keys(data.references).length > 0;
     const rebuildStatus = this.settings.rebuildStatus || "unknown";
