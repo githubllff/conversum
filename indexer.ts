@@ -476,7 +476,6 @@ export class ScriptureIndexer {
                             }
                         }
                     }
-                    this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
                     fileCache[file.path] = {
                         hash: '',
                         references: fileRefs,
@@ -507,6 +506,19 @@ export class ScriptureIndexer {
 
             await this.db.vacuum();
             await this.db.saveToDisk();
+
+            const dbRefCount = this.db.getReferenceCount();
+            const dbOccurrenceCount = this.db.getOccurrenceCount();
+            const dbFileCount = this.db.getFileCount();
+            await this.plugin.getLogger()?.log(
+                `Database verification: ${dbRefCount} refs, ${dbOccurrenceCount} occurrences, ${dbFileCount} files on disk`
+            );
+            if (dbRefCount !== uniqueRefs.size || dbOccurrenceCount !== this.progress.referencesFound) {
+                await this.plugin.getLogger()?.error(
+                    `Index mismatch: memory has ${uniqueRefs.size} refs/${this.progress.referencesFound} occurrences, ` +
+                    `DB has ${dbRefCount}/${dbOccurrenceCount}`
+                );
+            }
 
             try {
                 this.plugin.settings.rebuildStatus = 'complete';
@@ -613,7 +625,6 @@ export class ScriptureIndexer {
                         };
                     }
                 }
-                this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
                 this.data.fileCache[file.path] = {
                     hash: '',
                     references: fileRefs,

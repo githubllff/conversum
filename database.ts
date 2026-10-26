@@ -571,6 +571,15 @@ export class IndexDatabase {
         return result[0].values[0][0] as number;
     }
 
+    getOccurrenceCount(): number {
+        if (!this.db) return 0;
+        const result = this.db.exec(`
+            SELECT COUNT(*) FROM ref_occurrences
+        `);
+        if (result.length === 0) return 0;
+        return result[0].values[0][0] as number;
+    }
+
     getFileCount(): number {
         if (!this.db) return 0;
         const result = this.db.exec(`
@@ -686,18 +695,26 @@ export class IndexDatabase {
             `, [rangeKey, filePath]);
         } catch (e) {
             console.error(`con[VER]sum: Error inserting occurrence ${rangeKey}:`, e);
+            void this.plugin.getLogger()?.error(`Failed to insert occurrence ${rangeKey} for ${filePath}`, e);
         }
     }
 
     upsertFileIndex(filePath: string, lastModified: number, language: string | null): void {
         if (!this.db) return;
         try {
+            // Do NOT use INSERT OR REPLACE here. REPLACE deletes the existing
+            // file_index row first, which cascades to ref_occurrences and wipes
+            // every occurrence for that file. Use a true UPSERT instead.
             this.db.run(`
-                INSERT OR REPLACE INTO file_index (file_path, last_modified, language)
+                INSERT INTO file_index (file_path, last_modified, language)
                 VALUES (?, ?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    last_modified = excluded.last_modified,
+                    language = excluded.language
             `, [filePath, lastModified, language || null]);
         } catch (e) {
             console.error(`con[VER]sum: Error upserting file index ${filePath}:`, e);
+            void this.plugin.getLogger()?.error(`Failed to upsert file index ${filePath}`, e);
         }
     }
 

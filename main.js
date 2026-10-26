@@ -3275,6 +3275,14 @@ var IndexDatabase = class {
     if (result.length === 0) return 0;
     return result[0].values[0][0];
   }
+  getOccurrenceCount() {
+    if (!this.db) return 0;
+    const result = this.db.exec(`
+            SELECT COUNT(*) FROM ref_occurrences
+        `);
+    if (result.length === 0) return 0;
+    return result[0].values[0][0];
+  }
   getFileCount() {
     if (!this.db) return 0;
     const result = this.db.exec(`
@@ -3366,17 +3374,22 @@ var IndexDatabase = class {
             `, [rangeKey, filePath]);
     } catch (e) {
       console.error(`con[VER]sum: Error inserting occurrence ${rangeKey}:`, e);
+      void this.plugin.getLogger()?.error(`Failed to insert occurrence ${rangeKey} for ${filePath}`, e);
     }
   }
   upsertFileIndex(filePath, lastModified, language) {
     if (!this.db) return;
     try {
       this.db.run(`
-                INSERT OR REPLACE INTO file_index (file_path, last_modified, language)
+                INSERT INTO file_index (file_path, last_modified, language)
                 VALUES (?, ?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    last_modified = excluded.last_modified,
+                    language = excluded.language
             `, [filePath, lastModified, language || null]);
     } catch (e) {
       console.error(`con[VER]sum: Error upserting file index ${filePath}:`, e);
+      void this.plugin.getLogger()?.error(`Failed to upsert file index ${filePath}`, e);
     }
   }
   deleteFileReferences(filePath) {
@@ -4140,7 +4153,6 @@ var ScriptureIndexer = class {
               }
             }
           }
-          this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
           fileCache[file.path] = {
             hash: "",
             references: fileRefs,
@@ -4167,6 +4179,17 @@ var ScriptureIndexer = class {
       await this.db.commitTransaction(false);
       await this.db.vacuum();
       await this.db.saveToDisk();
+      const dbRefCount = this.db.getReferenceCount();
+      const dbOccurrenceCount = this.db.getOccurrenceCount();
+      const dbFileCount = this.db.getFileCount();
+      await this.plugin.getLogger()?.log(
+        `Database verification: ${dbRefCount} refs, ${dbOccurrenceCount} occurrences, ${dbFileCount} files on disk`
+      );
+      if (dbRefCount !== uniqueRefs.size || dbOccurrenceCount !== this.progress.referencesFound) {
+        await this.plugin.getLogger()?.error(
+          `Index mismatch: memory has ${uniqueRefs.size} refs/${this.progress.referencesFound} occurrences, DB has ${dbRefCount}/${dbOccurrenceCount}`
+        );
+      }
       try {
         this.plugin.settings.rebuildStatus = "complete";
         await this.plugin.saveSettings();
@@ -4270,7 +4293,6 @@ var ScriptureIndexer = class {
             };
           }
         }
-        this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
         this.data.fileCache[file.path] = {
           hash: "",
           references: fileRefs,
