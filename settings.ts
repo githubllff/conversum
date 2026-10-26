@@ -204,5 +204,123 @@ export class ConversumSettingTab extends PluginSettingTab {
                     this.display();
                 });
             });
+
+        new Setting(containerEl).setName('Database').setHeading();
+
+        new Setting(containerEl)
+            .setName('Import compiled database')
+            .setDesc(
+                'Replace the current index with a database compiled on another device, such as a desktop. ' +
+                'Choose a .db file, or place it at the vault root as conversum-index.db and use "From vault". ' +
+                'Files that match the imported index are marked as up to date so they are not reindexed.'
+            )
+            .addButton((button) => {
+                button.setButtonText('Choose file');
+                button.setWarning();
+                button.onClick(() => this.openDatabaseFilePicker());
+            })
+            .addButton((button) => {
+                button.setButtonText('From vault');
+                button.onClick(() => {
+                    void this.importDatabaseFromVault();
+                });
+            });
+
+        new Setting(containerEl)
+            .setName('Export compiled database')
+            .setDesc(
+                'Save a copy of the current index as conversum-index.db at the vault root. ' +
+                'Sync this file to another device, then use "From vault" there to import it.'
+            )
+            .addButton((button) => {
+                button.setButtonText('Export');
+                button.onClick(() => {
+                    void this.exportDatabaseToVault();
+                });
+            });
+    }
+
+    private openDatabaseFilePicker(): void {
+        if (this.plugin.indexer?.isBusy()) {
+            new Notice('Indexing or formatting is in progress. Wait for it to finish, then try again.');
+            return;
+        }
+
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.db,.sqlite,.sqlite3,application/octet-stream,application/x-sqlite3';
+        input.style.display = 'none';
+
+        const cleanup = (): void => {
+            if (input.parentNode) {
+                input.parentNode.removeChild(input);
+            }
+        };
+
+        input.addEventListener('change', () => {
+            const file = input.files && input.files[0];
+            if (!file) {
+                cleanup();
+                return;
+            }
+            void this.runDatabaseImport(() => this.readFileAsArrayBuffer(file)).finally(cleanup);
+        }, { once: true });
+
+        document.body.appendChild(input);
+        input.click();
+        window.setTimeout(cleanup, 120000);
+    }
+
+    private async importDatabaseFromVault(): Promise<void> {
+        const path = 'conversum-index.db';
+        await this.runDatabaseImport(async () => {
+            const adapter = this.plugin.app.vault.adapter;
+            if (!(await adapter.exists(path))) {
+                throw new Error(`No ${path} found at the vault root.`);
+            }
+            return await adapter.readBinary(path);
+        });
+    }
+
+    private async runDatabaseImport(load: () => Promise<ArrayBuffer>): Promise<void> {
+        if (this.plugin.indexer?.isBusy()) {
+            new Notice('Indexing or formatting is in progress. Wait for it to finish, then try again.');
+            return;
+        }
+
+        const notice = new Notice('Importing database...', 0);
+        try {
+            const bytes = await load();
+            if (bytes.byteLength === 0) {
+                throw new Error('The selected file is empty.');
+            }
+            await this.plugin.importDatabase(bytes);
+        } catch (e) {
+            await this.plugin.getLogger()?.error('Database import failed', e);
+            const message = e instanceof Error ? e.message : String(e);
+            new Notice(`Database import failed: ${message}`, 10000);
+        } finally {
+            notice.hide();
+        }
+    }
+
+    private async exportDatabaseToVault(): Promise<void> {
+        try {
+            const path = await this.plugin.exportDatabaseToVault();
+            new Notice(`Database exported to vault root: ${path}`);
+        } catch (e) {
+            await this.plugin.getLogger()?.error('Database export failed', e);
+            const message = e instanceof Error ? e.message : String(e);
+            new Notice(`Database export failed: ${message}`, 10000);
+        }
+    }
+
+    private readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as ArrayBuffer);
+            reader.onerror = () => reject(reader.error || new Error('Could not read the selected file.'));
+            reader.readAsArrayBuffer(file);
+        });
     }
 }

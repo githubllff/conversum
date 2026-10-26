@@ -146,6 +146,267 @@ export class IndexDatabase {
         }
     }
 
+    /**
+     * Reload the in-memory database from the on-disk file. Used after importing
+     * a compiled database, and after restoring a backup.
+     */
+    async reloadFromDisk(): Promise<void> {
+        if (this.inTransaction) {
+            try {
+                this.db?.run('ROLLBACK');
+            } catch {
+            }
+            this.inTransaction = false;
+        }
+        if (this.db) {
+            try {
+                this.db.close();
+            } catch {
+            }
+            this.db = null;
+        }
+        this.initialized = false;
+        this.data = {
+            version: '',
+            lastUpdated: 0,
+            references: {},
+            fileCache: {}
+        };
+        await this.init();
+    }
+
+    /**
+     * Read the on-disk database, saving any pending in-memory changes first.
+     */
+    async readDatabaseFile(): Promise<ArrayBuffer | null> {
+        if (this.db && this.initialized) {
+            await this.saveToDisk();
+        } else {
+            await this.saveInProgress.catch(() => {});
+        }
+        const adapter = this.plugin.app.vault.adapter;
+        const dbPath = `.obsidian/plugins/conversum/${DB_NAME}`;
+        if (!(await adapter.exists(dbPath))) {
+            return null;
+        }
+        return await adapter.readBinary(dbPath);
+    }
+
+    /**
+     * Validate an external SQLite file before importing it. This checks the
+     * SQLite header, integrity, the expected schema, and that the index is not
+     * obviously incomplete.
+     */
+    private validateDatabaseBytes(bytes: ArrayBuffer): { refs: number; occurrences: number; files: number } {
+        if (!this.SQL) {
+            throw new Error('Database engine is not initialized');
+        }
+        const data = new Uint8Array(bytes);
+        if (data.length < 16) {
+            throw new Error('File is too small to be a SQLite database');
+        }
+        const header = 'SQLite format 3\0';
+        for (let i = 0; i < header.length; i++) {
+            if (data[i] !== header.charCodeAt(i)) {
+                throw new Error('Not a SQLite database');
+            }
+        }
+
+        let testDb: any = null;
+        try {
+            testDb = new this.SQL.Database(data);
+
+            const integrity = testDb.exec('PRAGMA integrity_check');
+            const integrityOk = integrity.length > 0 &&
+                integrity[0].values.length > 0 &&
+                integrity[0].values.every((row: any[]) => row[0] === 'ok');
+            if (!integrityOk) {
+                throw new Error('Database failed the SQLite integrity check');
+            }
+
+            const requiredTables: { [table: string]: string[] } = {
+                file_index: ['file_path', 'last_modified', 'language'],
+                ref_detail: [
+                    'range_key', 'start_bcv', 'end_bcv', 'book_id', 'chapter',
+                    'start_verse', 'end_verse', 'end_chapter', 'formatted'
+                ],
+                ref_occurrences: ['range_key', 'file_path']
+            };
+
+            for (const [table, requiredColumns] of Object.entries(requiredTables)) {
+                const tableInfo = testDb.exec(`PRAGMA table_info(${table})`);
+                if (tableInfo.length === 0 || tableInfo[0].values.length === 0) {
+                    throw new Error(`Missing database table: ${table}`);
+                }
+                const existingColumns = new Set(
+                    tableInfo[0].values.map((row: any[]) => row[1] as string)
+                );
+                for (const column of requiredColumns) {
+                    if (!existingColumns.has(column)) {
+                        throw new Error(`Missing database column: ${table}.${column}`);
+                    }
+                }
+            }
+
+            const foreignKeyCheck = testDb.exec('PRAGMA foreign_key_check');
+            if (foreignKeyCheck.length > 0 && foreignKeyCheck[0].values.length > 0) {
+                throw new Error('Database contains broken foreign-key references');
+            }
+
+            const orphanResult = testDb.exec(`
+                SELECT COUNT(*)
+                FROM ref_detail d
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ref_occurrences o WHERE o.range_key = d.range_key
+                )
+            `);
+            const orphanRefs = orphanResult.length > 0 ? Number(orphanResult[0].values[0][0]) || 0 : 0;
+            if (orphanRefs > 0) {
+                throw new Error(`Database contains ${orphanRefs} references with no occurrences`);
+            }
+
+            const countsResult = testDb.exec(`
+                SELECT
+                    (SELECT COUNT(DISTINCT range_key) FROM ref_detail),
+                    (SELECT COUNT(*) FROM ref_occurrences),
+                    (SELECT COUNT(*) FROM file_index)
+            `);
+            if (countsResult.length === 0 || countsResult[0].values.length === 0) {
+                throw new Error('Could not read database counts');
+            }
+            const row = countsResult[0].values[0];
+            const refs = Number(row[0]) || 0;
+            const occurrences = Number(row[1]) || 0;
+            const files = Number(row[2]) || 0;
+
+            if (files === 0) {
+                throw new Error('Database contains no indexed files');
+            }
+            if (refs === 0) {
+                throw new Error('Database contains no references');
+            }
+            if (occurrences === 0) {
+                throw new Error('Database contains no reference occurrences');
+            }
+            if (occurrences < refs) {
+                throw new Error(
+                    `Database looks incomplete: ${occurrences} occurrences for ${refs} references`
+                );
+            }
+            if (files > 100 && occurrences < files) {
+                throw new Error(
+                    `Database looks incomplete: ${occurrences} occurrences for ${files} indexed files. ` +
+                    `Rebuild the index and export the database again.`
+                );
+            }
+
+            return { refs, occurrences, files };
+        } finally {
+            if (testDb) {
+                try {
+                    testDb.close();
+                } catch {
+                }
+            }
+        }
+    }
+
+    /**
+     * Replace the current database with a compiled database file.
+     *
+     * The file is validated first, then written atomically. The previous
+     * database is kept as a temporary backup until the imported file has been
+     * loaded successfully.
+     */
+    async importDatabase(bytes: ArrayBuffer): Promise<{ refs: number; occurrences: number; files: number }> {
+        await this.saveInProgress.catch(() => {});
+        const counts = this.validateDatabaseBytes(bytes);
+
+        const adapter = this.plugin.app.vault.adapter;
+        const dir = '.obsidian/plugins/conversum';
+        const dbPath = `${dir}/${DB_NAME}`;
+        const tmpPath = `${dir}/${DB_NAME}.import.tmp`;
+        const importBackupPath = `${dir}/${DB_NAME}.before-import`;
+
+        await adapter.writeBinary(tmpPath, bytes);
+
+        let oldDatabaseMoved = false;
+        try {
+            if (await adapter.exists(importBackupPath)) {
+                await adapter.remove(importBackupPath);
+            }
+            if (await adapter.exists(dbPath)) {
+                await adapter.rename(dbPath, importBackupPath);
+                oldDatabaseMoved = true;
+            }
+            await adapter.rename(tmpPath, dbPath);
+
+            await this.reloadFromDisk();
+
+            const actualRefs = this.getReferenceCount();
+            const actualOccurrences = this.getOccurrenceCount();
+            if (actualRefs !== counts.refs || actualOccurrences !== counts.occurrences) {
+                throw new Error(
+                    `Imported database verification failed (expected ${counts.refs} refs/` +
+                    `${counts.occurrences} occurrences, got ${actualRefs}/${actualOccurrences})`
+                );
+            }
+
+            if (await adapter.exists(importBackupPath)) {
+                await adapter.remove(importBackupPath);
+            }
+            return counts;
+        } catch (e) {
+            try {
+                if (await adapter.exists(tmpPath)) {
+                    await adapter.remove(tmpPath);
+                }
+            } catch {
+            }
+            try {
+                if (oldDatabaseMoved && await adapter.exists(importBackupPath)) {
+                    if (await adapter.exists(dbPath)) {
+                        await adapter.remove(dbPath);
+                    }
+                    await adapter.rename(importBackupPath, dbPath);
+                }
+            } catch {
+            }
+            try {
+                await this.reloadFromDisk();
+            } catch {
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Update the stored modification times to match the current vault. This is
+     * used after importing a database so a timestamp-only difference does not
+     * trigger a full reindex on the importing device.
+     */
+    async updateFileTimestamps(entries: Array<{ path: string; lastModified: number }>): Promise<void> {
+        if (!this.db) return;
+        const updates = entries.filter((entry) => !!this.data.fileCache[entry.path]);
+        if (updates.length === 0) return;
+
+        this.beginTransaction();
+        try {
+            for (const entry of updates) {
+                this.db.run(
+                    'UPDATE file_index SET last_modified = ? WHERE file_path = ?',
+                    [entry.lastModified, entry.path]
+                );
+                this.data.fileCache[entry.path].lastModified = entry.lastModified;
+            }
+            await this.commitTransaction(false);
+        } catch (e) {
+            this.rollbackTransaction();
+            throw e;
+        }
+        await this.saveToDisk();
+    }
+
     async resetDatabase(): Promise<void> {
         try {
             if (this.inTransaction && this.db) {

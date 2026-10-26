@@ -43,8 +43,22 @@ If you are concerned about the "Scorecard" review or the "Caution" warning on th
 - **Output language** – Language for displaying book names in the concordance view and export.
 - **Reference format** – How scripture references are displayed (Full, Standard, Official).
 - **Auto-index** – Automatically update the index when files change. Disable this while setting up your source language to avoid unnecessary reindexing.
-- **Excluded folders** – Additional folders to exclude from indexing. `_templates`, `_attachments`, and `.obsidian` are always excluded.
-- **Rebuild index** – Force a full rebuild of the concordance index.
+- **Excluded folders** — Additional folders to exclude from indexing. `_templates`, `_attachments`, and `.obsidian` are always excluded.
+- **Rebuild index** — Force a full rebuild of the concordance index.
+- **Import compiled database** — Replace the current index with a database compiled on another device. Choose a `.db` file, or place it at the vault root as `conversum-index.db` and use **From vault**.
+- **Export compiled database** — Save a copy of the current index as `conversum-index.db` at the vault root. This makes it easy to move the index to another device.
+
+### Moving the index between devices
+
+A full rebuild can be slow on mobile. To reuse an index built on desktop:
+
+1. On desktop, build or rebuild the index.
+2. Open **Settings → con[VER]sum → Export compiled database** and click **Export**. This writes `conversum-index.db` to the vault root.
+3. Sync the vault (or copy the file) to the mobile device.
+4. On mobile, open **Settings → con[VER]sum → Import compiled database** and click **From vault**. If the file is somewhere else on the device, use **Choose file** instead.
+5. The plugin validates the database before replacing the current index. Files that match the imported index are marked as up to date, so they are not reindexed.
+
+If notes changed after the database was exported, run **Rebuild index** on the device after importing.
 
 ---
 

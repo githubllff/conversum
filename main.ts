@@ -370,6 +370,74 @@ export default class ConversumPlugin extends Plugin {
     }
 
     // ============================================================
+    // DATABASE IMPORT / EXPORT
+    // ============================================================
+
+    public async importDatabase(bytes: ArrayBuffer): Promise<void> {
+        if (!this.db) {
+            throw new Error('Database is not initialized');
+        }
+        if (this.indexer?.isBusy()) {
+            throw new Error('Indexing or formatting is in progress. Wait for it to finish, then try again.');
+        }
+
+        const watcherWasEnabled = this.fileWatcherEnabled;
+        this.stopFileWatcher();
+        try {
+            this.indexer?.abort();
+            const counts = await this.db.importDatabase(bytes);
+
+            // The imported index was built on another device. Treat matching
+            // files as current so timestamp differences do not trigger a full
+            // reindex on this device.
+            const currentFiles = this.app.vault.getMarkdownFiles().map((file) => ({
+                path: file.path,
+                lastModified: file.stat.mtime
+            }));
+            await this.db.updateFileTimestamps(currentFiles);
+            this.indexer?.setData(this.db.getData());
+
+            this.settings.rebuildStatus = 'complete';
+            try {
+                await this.saveSettings();
+            } catch {
+            }
+
+            this.refreshConcordanceView();
+            this.refreshSettings();
+            await this.logger?.log(
+                `Imported database: ${counts.refs} refs, ${counts.occurrences} occurrences, ${counts.files} files`
+            );
+            new Notice(
+                `Database imported: ${counts.refs} references, ${counts.occurrences} occurrences, ${counts.files} files.`
+            );
+        } finally {
+            if (watcherWasEnabled) {
+                this.startFileWatcher();
+            }
+        }
+    }
+
+    public async exportDatabaseToVault(): Promise<string> {
+        if (!this.db) {
+            throw new Error('Database is not initialized');
+        }
+        if (this.indexer?.isBusy()) {
+            throw new Error('Indexing or formatting is in progress. Wait for it to finish, then try again.');
+        }
+
+        const bytes = await this.db.readDatabaseFile();
+        if (!bytes) {
+            throw new Error('No database file found');
+        }
+
+        const exportPath = 'conversum-index.db';
+        await this.app.vault.adapter.writeBinary(exportPath, bytes);
+        await this.logger?.log(`Exported database to vault root: ${exportPath} (${bytes.byteLength} bytes)`);
+        return exportPath;
+    }
+
+    // ============================================================
     // FILE WATCHER
     // ============================================================
 

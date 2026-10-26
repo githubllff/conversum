@@ -2890,6 +2890,251 @@ var IndexDatabase = class {
       }
     }
   }
+  /**
+   * Reload the in-memory database from the on-disk file. Used after importing
+   * a compiled database, and after restoring a backup.
+   */
+  async reloadFromDisk() {
+    if (this.inTransaction) {
+      try {
+        this.db?.run("ROLLBACK");
+      } catch {
+      }
+      this.inTransaction = false;
+    }
+    if (this.db) {
+      try {
+        this.db.close();
+      } catch {
+      }
+      this.db = null;
+    }
+    this.initialized = false;
+    this.data = {
+      version: "",
+      lastUpdated: 0,
+      references: {},
+      fileCache: {}
+    };
+    await this.init();
+  }
+  /**
+   * Read the on-disk database, saving any pending in-memory changes first.
+   */
+  async readDatabaseFile() {
+    if (this.db && this.initialized) {
+      await this.saveToDisk();
+    } else {
+      await this.saveInProgress.catch(() => {
+      });
+    }
+    const adapter = this.plugin.app.vault.adapter;
+    const dbPath = `.obsidian/plugins/conversum/${DB_NAME}`;
+    if (!await adapter.exists(dbPath)) {
+      return null;
+    }
+    return await adapter.readBinary(dbPath);
+  }
+  /**
+   * Validate an external SQLite file before importing it. This checks the
+   * SQLite header, integrity, the expected schema, and that the index is not
+   * obviously incomplete.
+   */
+  validateDatabaseBytes(bytes) {
+    if (!this.SQL) {
+      throw new Error("Database engine is not initialized");
+    }
+    const data = new Uint8Array(bytes);
+    if (data.length < 16) {
+      throw new Error("File is too small to be a SQLite database");
+    }
+    const header = "SQLite format 3\0";
+    for (let i = 0; i < header.length; i++) {
+      if (data[i] !== header.charCodeAt(i)) {
+        throw new Error("Not a SQLite database");
+      }
+    }
+    let testDb = null;
+    try {
+      testDb = new this.SQL.Database(data);
+      const integrity = testDb.exec("PRAGMA integrity_check");
+      const integrityOk = integrity.length > 0 && integrity[0].values.length > 0 && integrity[0].values.every((row2) => row2[0] === "ok");
+      if (!integrityOk) {
+        throw new Error("Database failed the SQLite integrity check");
+      }
+      const requiredTables = {
+        file_index: ["file_path", "last_modified", "language"],
+        ref_detail: [
+          "range_key",
+          "start_bcv",
+          "end_bcv",
+          "book_id",
+          "chapter",
+          "start_verse",
+          "end_verse",
+          "end_chapter",
+          "formatted"
+        ],
+        ref_occurrences: ["range_key", "file_path"]
+      };
+      for (const [table, requiredColumns] of Object.entries(requiredTables)) {
+        const tableInfo = testDb.exec(`PRAGMA table_info(${table})`);
+        if (tableInfo.length === 0 || tableInfo[0].values.length === 0) {
+          throw new Error(`Missing database table: ${table}`);
+        }
+        const existingColumns = new Set(
+          tableInfo[0].values.map((row2) => row2[1])
+        );
+        for (const column of requiredColumns) {
+          if (!existingColumns.has(column)) {
+            throw new Error(`Missing database column: ${table}.${column}`);
+          }
+        }
+      }
+      const foreignKeyCheck = testDb.exec("PRAGMA foreign_key_check");
+      if (foreignKeyCheck.length > 0 && foreignKeyCheck[0].values.length > 0) {
+        throw new Error("Database contains broken foreign-key references");
+      }
+      const orphanResult = testDb.exec(`
+                SELECT COUNT(*)
+                FROM ref_detail d
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ref_occurrences o WHERE o.range_key = d.range_key
+                )
+            `);
+      const orphanRefs = orphanResult.length > 0 ? Number(orphanResult[0].values[0][0]) || 0 : 0;
+      if (orphanRefs > 0) {
+        throw new Error(`Database contains ${orphanRefs} references with no occurrences`);
+      }
+      const countsResult = testDb.exec(`
+                SELECT
+                    (SELECT COUNT(DISTINCT range_key) FROM ref_detail),
+                    (SELECT COUNT(*) FROM ref_occurrences),
+                    (SELECT COUNT(*) FROM file_index)
+            `);
+      if (countsResult.length === 0 || countsResult[0].values.length === 0) {
+        throw new Error("Could not read database counts");
+      }
+      const row = countsResult[0].values[0];
+      const refs = Number(row[0]) || 0;
+      const occurrences = Number(row[1]) || 0;
+      const files = Number(row[2]) || 0;
+      if (files === 0) {
+        throw new Error("Database contains no indexed files");
+      }
+      if (refs === 0) {
+        throw new Error("Database contains no references");
+      }
+      if (occurrences === 0) {
+        throw new Error("Database contains no reference occurrences");
+      }
+      if (occurrences < refs) {
+        throw new Error(
+          `Database looks incomplete: ${occurrences} occurrences for ${refs} references`
+        );
+      }
+      if (files > 100 && occurrences < files) {
+        throw new Error(
+          `Database looks incomplete: ${occurrences} occurrences for ${files} indexed files. Rebuild the index and export the database again.`
+        );
+      }
+      return { refs, occurrences, files };
+    } finally {
+      if (testDb) {
+        try {
+          testDb.close();
+        } catch {
+        }
+      }
+    }
+  }
+  /**
+   * Replace the current database with a compiled database file.
+   *
+   * The file is validated first, then written atomically. The previous
+   * database is kept as a temporary backup until the imported file has been
+   * loaded successfully.
+   */
+  async importDatabase(bytes) {
+    await this.saveInProgress.catch(() => {
+    });
+    const counts = this.validateDatabaseBytes(bytes);
+    const adapter = this.plugin.app.vault.adapter;
+    const dir = ".obsidian/plugins/conversum";
+    const dbPath = `${dir}/${DB_NAME}`;
+    const tmpPath = `${dir}/${DB_NAME}.import.tmp`;
+    const importBackupPath = `${dir}/${DB_NAME}.before-import`;
+    await adapter.writeBinary(tmpPath, bytes);
+    let oldDatabaseMoved = false;
+    try {
+      if (await adapter.exists(importBackupPath)) {
+        await adapter.remove(importBackupPath);
+      }
+      if (await adapter.exists(dbPath)) {
+        await adapter.rename(dbPath, importBackupPath);
+        oldDatabaseMoved = true;
+      }
+      await adapter.rename(tmpPath, dbPath);
+      await this.reloadFromDisk();
+      const actualRefs = this.getReferenceCount();
+      const actualOccurrences = this.getOccurrenceCount();
+      if (actualRefs !== counts.refs || actualOccurrences !== counts.occurrences) {
+        throw new Error(
+          `Imported database verification failed (expected ${counts.refs} refs/${counts.occurrences} occurrences, got ${actualRefs}/${actualOccurrences})`
+        );
+      }
+      if (await adapter.exists(importBackupPath)) {
+        await adapter.remove(importBackupPath);
+      }
+      return counts;
+    } catch (e) {
+      try {
+        if (await adapter.exists(tmpPath)) {
+          await adapter.remove(tmpPath);
+        }
+      } catch {
+      }
+      try {
+        if (oldDatabaseMoved && await adapter.exists(importBackupPath)) {
+          if (await adapter.exists(dbPath)) {
+            await adapter.remove(dbPath);
+          }
+          await adapter.rename(importBackupPath, dbPath);
+        }
+      } catch {
+      }
+      try {
+        await this.reloadFromDisk();
+      } catch {
+      }
+      throw e;
+    }
+  }
+  /**
+   * Update the stored modification times to match the current vault. This is
+   * used after importing a database so a timestamp-only difference does not
+   * trigger a full reindex on the importing device.
+   */
+  async updateFileTimestamps(entries) {
+    if (!this.db) return;
+    const updates = entries.filter((entry) => !!this.data.fileCache[entry.path]);
+    if (updates.length === 0) return;
+    this.beginTransaction();
+    try {
+      for (const entry of updates) {
+        this.db.run(
+          "UPDATE file_index SET last_modified = ? WHERE file_path = ?",
+          [entry.lastModified, entry.path]
+        );
+        this.data.fileCache[entry.path].lastModified = entry.lastModified;
+      }
+      await this.commitTransaction(false);
+    } catch (e) {
+      this.rollbackTransaction();
+      throw e;
+    }
+    await this.saveToDisk();
+  }
   async resetDatabase() {
     try {
       if (this.inTransaction && this.db) {
@@ -5017,6 +5262,101 @@ var ConversumSettingTab = class extends import_obsidian2.PluginSettingTab {
         this.display();
       });
     });
+    new import_obsidian2.Setting(containerEl).setName("Database").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("Import compiled database").setDesc(
+      'Replace the current index with a database compiled on another device, such as a desktop. Choose a .db file, or place it at the vault root as conversum-index.db and use "From vault". Files that match the imported index are marked as up to date so they are not reindexed.'
+    ).addButton((button) => {
+      button.setButtonText("Choose file");
+      button.setWarning();
+      button.onClick(() => this.openDatabaseFilePicker());
+    }).addButton((button) => {
+      button.setButtonText("From vault");
+      button.onClick(() => {
+        void this.importDatabaseFromVault();
+      });
+    });
+    new import_obsidian2.Setting(containerEl).setName("Export compiled database").setDesc(
+      'Save a copy of the current index as conversum-index.db at the vault root. Sync this file to another device, then use "From vault" there to import it.'
+    ).addButton((button) => {
+      button.setButtonText("Export");
+      button.onClick(() => {
+        void this.exportDatabaseToVault();
+      });
+    });
+  }
+  openDatabaseFilePicker() {
+    if (this.plugin.indexer?.isBusy()) {
+      new import_obsidian2.Notice("Indexing or formatting is in progress. Wait for it to finish, then try again.");
+      return;
+    }
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".db,.sqlite,.sqlite3,application/octet-stream,application/x-sqlite3";
+    input.style.display = "none";
+    const cleanup = () => {
+      if (input.parentNode) {
+        input.parentNode.removeChild(input);
+      }
+    };
+    input.addEventListener("change", () => {
+      const file = input.files && input.files[0];
+      if (!file) {
+        cleanup();
+        return;
+      }
+      void this.runDatabaseImport(() => this.readFileAsArrayBuffer(file)).finally(cleanup);
+    }, { once: true });
+    document.body.appendChild(input);
+    input.click();
+    window.setTimeout(cleanup, 12e4);
+  }
+  async importDatabaseFromVault() {
+    const path = "conversum-index.db";
+    await this.runDatabaseImport(async () => {
+      const adapter = this.plugin.app.vault.adapter;
+      if (!await adapter.exists(path)) {
+        throw new Error(`No ${path} found at the vault root.`);
+      }
+      return await adapter.readBinary(path);
+    });
+  }
+  async runDatabaseImport(load) {
+    if (this.plugin.indexer?.isBusy()) {
+      new import_obsidian2.Notice("Indexing or formatting is in progress. Wait for it to finish, then try again.");
+      return;
+    }
+    const notice = new import_obsidian2.Notice("Importing database...", 0);
+    try {
+      const bytes = await load();
+      if (bytes.byteLength === 0) {
+        throw new Error("The selected file is empty.");
+      }
+      await this.plugin.importDatabase(bytes);
+    } catch (e) {
+      await this.plugin.getLogger()?.error("Database import failed", e);
+      const message = e instanceof Error ? e.message : String(e);
+      new import_obsidian2.Notice(`Database import failed: ${message}`, 1e4);
+    } finally {
+      notice.hide();
+    }
+  }
+  async exportDatabaseToVault() {
+    try {
+      const path = await this.plugin.exportDatabaseToVault();
+      new import_obsidian2.Notice(`Database exported to vault root: ${path}`);
+    } catch (e) {
+      await this.plugin.getLogger()?.error("Database export failed", e);
+      const message = e instanceof Error ? e.message : String(e);
+      new import_obsidian2.Notice(`Database export failed: ${message}`, 1e4);
+    }
+  }
+  readFileAsArrayBuffer(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("Could not read the selected file."));
+      reader.readAsArrayBuffer(file);
+    });
   }
 };
 
@@ -5924,6 +6264,62 @@ var ConversumPlugin = class extends import_obsidian4.Plugin {
     this.indexer.startBackgroundFormatting();
     this.refreshConcordanceView();
     this.refreshSettings();
+  }
+  // ============================================================
+  // DATABASE IMPORT / EXPORT
+  // ============================================================
+  async importDatabase(bytes) {
+    if (!this.db) {
+      throw new Error("Database is not initialized");
+    }
+    if (this.indexer?.isBusy()) {
+      throw new Error("Indexing or formatting is in progress. Wait for it to finish, then try again.");
+    }
+    const watcherWasEnabled = this.fileWatcherEnabled;
+    this.stopFileWatcher();
+    try {
+      this.indexer?.abort();
+      const counts = await this.db.importDatabase(bytes);
+      const currentFiles = this.app.vault.getMarkdownFiles().map((file) => ({
+        path: file.path,
+        lastModified: file.stat.mtime
+      }));
+      await this.db.updateFileTimestamps(currentFiles);
+      this.indexer?.setData(this.db.getData());
+      this.settings.rebuildStatus = "complete";
+      try {
+        await this.saveSettings();
+      } catch {
+      }
+      this.refreshConcordanceView();
+      this.refreshSettings();
+      await this.logger?.log(
+        `Imported database: ${counts.refs} refs, ${counts.occurrences} occurrences, ${counts.files} files`
+      );
+      new import_obsidian4.Notice(
+        `Database imported: ${counts.refs} references, ${counts.occurrences} occurrences, ${counts.files} files.`
+      );
+    } finally {
+      if (watcherWasEnabled) {
+        this.startFileWatcher();
+      }
+    }
+  }
+  async exportDatabaseToVault() {
+    if (!this.db) {
+      throw new Error("Database is not initialized");
+    }
+    if (this.indexer?.isBusy()) {
+      throw new Error("Indexing or formatting is in progress. Wait for it to finish, then try again.");
+    }
+    const bytes = await this.db.readDatabaseFile();
+    if (!bytes) {
+      throw new Error("No database file found");
+    }
+    const exportPath = "conversum-index.db";
+    await this.app.vault.adapter.writeBinary(exportPath, bytes);
+    await this.logger?.log(`Exported database to vault root: ${exportPath} (${bytes.byteLength} bytes)`);
+    return exportPath;
   }
   // ============================================================
   // FILE WATCHER
