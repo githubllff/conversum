@@ -326,7 +326,7 @@ export class ScriptureIndexer {
                     if (!data) continue;
                     const ranges: Array<[string, string]> = [[
                         `${String(data.bookId).padStart(2, '0')}${String(data.chapter).padStart(3, '0')}${String(data.startVerse).padStart(3, '0')}`,
-                        `${String(data.bookId).padStart(2, '0')}${String(data.endChapter !== undefined && data.endChapter !== data.chapter ? data.endChapter : data.chapter).padStart(3, '0')}${String(data.endVerse).padStart(3, '0')}`
+                        `${String(data.bookId).padStart(2, '0')}${String(data.endChapter != null && data.endChapter !== data.chapter ? data.endChapter : data.chapter).padStart(3, '0')}${String(data.endVerse).padStart(3, '0')}`
                     ]];
                     const decoded = decodeScriptures(
                         ranges,
