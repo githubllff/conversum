@@ -99,6 +99,10 @@ export class IndexDatabase {
             } catch {
             }
             try {
+                this.resetRawFormattedReferences();
+            } catch {
+            }
+            try {
                 await this.loadDataFromDB();
             } catch (loadErr) {
                 console.error('con[VER]sum: Failed to load data from database, resetting tables', loadErr);
@@ -623,6 +627,23 @@ export class IndexDatabase {
         }
     }
 
+    private isRawFormattedReference(value: string | null): boolean {
+        return !!value && /^\d{8}-\d{8}$/.test(value);
+    }
+
+    /**
+     * Older versions stored raw BCV range keys in the formatted column when
+     * decoding failed. Clear those values so they can be formatted again.
+     */
+    private resetRawFormattedReferences(): void {
+        if (!this.db) return;
+        this.db.run(`
+            UPDATE ref_detail
+            SET formatted = NULL
+            WHERE formatted GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+        `);
+    }
+
     private async doSaveToDisk(): Promise<void> {
         if (!this.db) return;
         const adapter = this.plugin.app.vault.adapter;
@@ -805,6 +826,7 @@ export class IndexDatabase {
             SELECT COUNT(DISTINCT range_key) 
             FROM ref_detail 
             WHERE formatted IS NULL
+               OR formatted GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
         `);
         if (result.length === 0) return 0;
         return result[0].values[0][0] as number;
@@ -825,6 +847,7 @@ export class IndexDatabase {
             SELECT range_key 
             FROM ref_detail 
             WHERE formatted IS NULL
+               OR formatted GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
             LIMIT ?
         `, [limit]);
         if (result.length === 0) return [];
@@ -927,7 +950,8 @@ export class IndexDatabase {
             SELECT formatted FROM ref_detail WHERE range_key = ?
         `, [rangeKey]);
         if (result.length === 0 || result[0].values.length === 0) return null;
-        return result[0].values[0][0] as string || null;
+        const formatted = result[0].values[0][0] as string | null;
+        return this.isRawFormattedReference(formatted) ? null : (formatted || null);
     }
 
     // ============================================================
@@ -1192,7 +1216,10 @@ export class IndexDatabase {
                 const startVerse = row[columns.indexOf('start_verse')] as number;
                 const endVerse = row[columns.indexOf('end_verse')] as number;
                 const endChapter = row[columns.indexOf('end_chapter')] as number;
-                const formatted = row[columns.indexOf('formatted')] as string | null;
+                let formatted = row[columns.indexOf('formatted')] as string | null;
+                if (this.isRawFormattedReference(formatted)) {
+                    formatted = null;
+                }
                 const filePath = row[columns.indexOf('file_path')] as string;
                 const count = row[columns.indexOf('occurrence_count')] as number;
                 if (!entryMap.has(rangeKey)) {

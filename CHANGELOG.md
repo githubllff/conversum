@@ -22,6 +22,7 @@ ____
 
 ### Fixed
 
+- Fixed scripture references showing raw BCV keys (for example, `63001001-63001001`) instead of human-readable book and verse names. Existing raw values are reset and reformatted automatically.
 - Fixed index occurrences being deleted during updates by replacing `INSERT OR REPLACE` on `file_index` with a true UPSERT.
 - Fixed foreign keys being silently disabled after `sql.js` exports the database.
 - Improved database save reliability with atomic writes and recovery from corrupted database files.

@@ -216,7 +216,7 @@ export function decodeScriptures(
     
     try {
         const rangesJson = JSON.stringify(ranges);
-        const result = engine.decode(outputLanguage, nameFormat, rangesJson);
+        const result = engine.decode_scriptures(rangesJson);
         return JSON.parse(result);
     } catch {
         return null;
