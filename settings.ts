@@ -205,6 +205,34 @@ export class ConversumSettingTab extends PluginSettingTab {
                 });
             });
 
+        new Setting(containerEl)
+            .setName('Auto-backup index')
+            .setDesc('Keep a rolling backup copy of the index (.bak) so it can be restored if the app crashes or the index becomes corrupt.')
+            .addToggle((toggle) => {
+                toggle.setValue(this.plugin.settings.autoBackup);
+                toggle.onChange(async (value) => {
+                    this.plugin.settings.autoBackup = value;
+                    await this.plugin.saveSettings();
+                    this.display();
+                });
+            });
+
+        new Setting(containerEl)
+            .setName('Reformat all references')
+            .setDesc('Regenerate the human-readable formatted names for all indexed references (useful after changing the output language or format).')
+            .addButton((button) => {
+                button.setButtonText('Reformat');
+                button.onClick(async () => {
+                    if (this.plugin.indexer?.isBusy()) {
+                        new Notice('Indexing or formatting is in progress. Wait for it to finish, then try again.');
+                        return;
+                    }
+                    await this.plugin.reformatAllReferences();
+                    this.display();
+                    new Notice('Reformatting started in the background.');
+                });
+            });
+
         new Setting(containerEl).setName('Database').setHeading();
 
         new Setting(containerEl)
@@ -236,6 +264,20 @@ export class ConversumSettingTab extends PluginSettingTab {
                 button.setButtonText('Export');
                 button.onClick(() => {
                     void this.exportDatabaseToVault();
+                });
+            });
+
+        new Setting(containerEl)
+            .setName('Restore from backup')
+            .setDesc(
+                'Restore the index from the automatic backup copy (.bak) if the current index is corrupt or missing. ' +
+                'The current index is kept as a .corrupt file.'
+            )
+            .addButton((button) => {
+                button.setButtonText('Restore');
+                button.setWarning();
+                button.onClick(() => {
+                    void this.restoreFromBackup();
                 });
             });
     }
@@ -299,6 +341,31 @@ export class ConversumSettingTab extends PluginSettingTab {
             await this.plugin.getLogger()?.error('Database import failed', e);
             const message = e instanceof Error ? e.message : String(e);
             new Notice(`Database import failed: ${message}`, 10000);
+        } finally {
+            notice.hide();
+        }
+    }
+
+    private async restoreFromBackup(): Promise<void> {
+        if (this.plugin.indexer?.isBusy()) {
+            new Notice('Indexing or formatting is in progress. Wait for it to finish, then try again.');
+            return;
+        }
+        if (!(await this.plugin.getDatabase()?.hasBackup())) {
+            new Notice('No backup database found.');
+            return;
+        }
+        const notice = new Notice('Restoring from backup...', 0);
+        try {
+            const counts = await this.plugin.getDatabase()!.restoreFromBackup();
+            this.plugin.indexer?.setData(this.plugin.getDatabase()!.getData());
+            this.plugin.refreshConcordanceView();
+            this.plugin.refreshSettings();
+            new Notice(`Restored from backup: ${counts.refs} references, ${counts.occurrences} occurrences, ${counts.files} files.`);
+        } catch (e) {
+            await this.plugin.getLogger()?.error('Restore from backup failed', e);
+            const message = e instanceof Error ? e.message : String(e);
+            new Notice(`Restore from backup failed: ${message}`, 10000);
         } finally {
             notice.hide();
         }

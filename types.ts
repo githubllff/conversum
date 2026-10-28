@@ -5,6 +5,7 @@ export interface ConversumSettings {
     outputLanguage: string;
     nameFormat: 'full' | 'standard' | 'official';
     autoIndex: boolean;
+    autoBackup: boolean;
     excludedFolders: string[];
     rebuildStatus?: 'unknown' | 'complete' | 'in_progress' | 'failed' | 'aborted';
 }
@@ -14,6 +15,7 @@ export const DEFAULT_SETTINGS: ConversumSettings = {
     outputLanguage: 'en',
     nameFormat: 'full',
     autoIndex: true,
+    autoBackup: true,
     excludedFolders: [],
     rebuildStatus: 'unknown'
 };

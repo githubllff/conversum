@@ -105,20 +105,39 @@ export class IndexDatabase {
             try {
                 await this.loadDataFromDB();
             } catch (loadErr) {
-                console.error('con[VER]sum: Failed to load data from database, resetting tables', loadErr);
+                console.error('con[VER]sum: Failed to load data from database, attempting backup restore', loadErr);
+                let recoveredFromBackup = false;
                 try {
-                    this.db!.run('DELETE FROM ref_occurrences');
-                    this.db!.run('DELETE FROM ref_detail');
-                    this.db!.run('DELETE FROM file_index');
-                    this.db!.run('DELETE FROM metadata');
-                } catch {
+                    if (await adapter.exists(backupPath)) {
+                        const backupBytes = new Uint8Array(await adapter.readBinary(backupPath));
+                        const testDb = new this.SQL.Database(backupBytes);
+                        testDb.close();
+                        try { this.db!.close(); } catch { }
+                        this.db = new this.SQL.Database(backupBytes);
+                        this.db!.run('PRAGMA foreign_keys = ON;');
+                        this.createTables();
+                        await this.loadDataFromDB();
+                        recoveredFromBackup = true;
+                        console.log('con[VER]sum: Recovered data from backup copy');
+                    }
+                } catch (backupErr) {
+                    console.warn('con[VER]sum: Backup restore after data load failure failed', backupErr);
                 }
-                this.data = {
-                    version: this.plugin.manifest.version,
-                    lastUpdated: 0,
-                    references: {},
-                    fileCache: {}
-                };
+                if (!recoveredFromBackup) {
+                    try {
+                        this.db!.run('DELETE FROM ref_occurrences');
+                        this.db!.run('DELETE FROM ref_detail');
+                        this.db!.run('DELETE FROM file_index');
+                        this.db!.run('DELETE FROM metadata');
+                    } catch {
+                    }
+                    this.data = {
+                        version: this.plugin.manifest.version,
+                        lastUpdated: 0,
+                        references: {},
+                        fileCache: {}
+                    };
+                }
             }
             this.initialized = true;
             await this.saveToDisk();
@@ -154,6 +173,37 @@ export class IndexDatabase {
      * Reload the in-memory database from the on-disk file. Used after importing
      * a compiled database, and after restoring a backup.
      */
+    async hasBackup(): Promise<boolean> {
+        const adapter = this.plugin.app.vault.adapter;
+        const backupPath = `.obsidian/plugins/conversum/${DB_NAME}.bak`;
+        return await adapter.exists(backupPath);
+    }
+
+    async restoreFromBackup(): Promise<{ refs: number; occurrences: number; files: number }> {
+        const adapter = this.plugin.app.vault.adapter;
+        const dir = '.obsidian/plugins/conversum';
+        const dbPath = `${dir}/${DB_NAME}`;
+        const backupPath = `${dir}/${DB_NAME}.bak`;
+
+        if (!(await adapter.exists(backupPath))) {
+            throw new Error('No backup database found');
+        }
+
+        const bytes = await adapter.readBinary(backupPath);
+        const counts = this.validateDatabaseBytes(bytes);
+
+        if (await adapter.exists(dbPath)) {
+            try {
+                await adapter.rename(dbPath, `${dbPath}.corrupt.${Date.now()}`);
+            } catch {
+            }
+        }
+        await adapter.writeBinary(dbPath, bytes);
+
+        await this.reloadFromDisk();
+        return counts;
+    }
+
     async reloadFromDisk(): Promise<void> {
         if (this.inTransaction) {
             try {
@@ -679,7 +729,11 @@ export class IndexDatabase {
             }
             await adapter.rename(tmpPath, dbPath);
 
-            if (await adapter.exists(backupPath)) {
+            // Keep a rolling backup copy when auto-backup is enabled so a crash
+            // or corruption can be recovered from on the next load. When disabled,
+            // remove the stale backup to avoid keeping outdated copies around.
+            const keepBackup = this.plugin.settings?.autoBackup !== false;
+            if (!keepBackup && await adapter.exists(backupPath)) {
                 await adapter.remove(backupPath);
             }
         } catch (e) {

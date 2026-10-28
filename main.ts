@@ -16,6 +16,7 @@ export default class ConversumPlugin extends Plugin {
     private db: IndexDatabase | null = null;
     private logger: ConversumLogger | null = null;
     private rebuildTimeout: number | null = null;
+    private rebuildNotice: Notice | null = null;
     private fileWatcherEnabled = false;
     private pendingFiles = new Set<TFile>();
     private relatedPopout: RelatedNotesPopout | null = null;
@@ -257,6 +258,9 @@ export default class ConversumPlugin extends Plugin {
             if (typeof savedData.autoIndex === 'boolean') {
                 this.settings.autoIndex = savedData.autoIndex;
             }
+            if (typeof savedData.autoBackup === 'boolean') {
+                this.settings.autoBackup = savedData.autoBackup;
+            }
             if (Array.isArray(savedData.excludedFolders)) {
                 this.settings.excludedFolders = savedData.excludedFolders;
             }
@@ -274,6 +278,7 @@ export default class ConversumPlugin extends Plugin {
             outputLanguage: this.settings.outputLanguage,
             nameFormat: this.settings.nameFormat,
             autoIndex: this.settings.autoIndex,
+            autoBackup: this.settings.autoBackup,
             excludedFolders: this.settings.excludedFolders
         };
         await this.saveData(dataToSave);
@@ -325,6 +330,22 @@ export default class ConversumPlugin extends Plugin {
         }
 
         const notice = new Notice('Building concordance index...', 0);
+        this.rebuildNotice = notice;
+
+        // Stop button on the floating notification so an in-progress index
+        // can be aborted (e.g. to import a compiled index from the vault).
+        const stopBtn = notice.messageEl.createEl('button', { text: 'Stop indexing' });
+        stopBtn.style.marginLeft = '10px';
+        stopBtn.style.cursor = 'pointer';
+        stopBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!this.indexer) return;
+            stopBtn.disabled = true;
+            stopBtn.textContent = 'Stopping...';
+            this.indexer.abort();
+            this.logger?.log('Index rebuild stop requested by user');
+        });
 
         try {
             const progressCallback = (progress: IndexProgress) => {
@@ -333,11 +354,20 @@ export default class ConversumPlugin extends Plugin {
                     : 0;
                 const fileInfo = progress.currentFile ? ` (${progress.currentFile})` : '';
                 notice.setMessage(`Indexing: ${percent}% (${progress.processedFiles}/${progress.totalFiles} files${fileInfo}, ${progress.uniqueReferences} unique refs)`);
+                // Re-append the button after setMessage replaces the content
+                if (!stopBtn.isConnected) {
+                    notice.messageEl.appendChild(stopBtn);
+                }
             };
 
             await this.indexer.rebuildIndex(progressCallback);
             const data = this.indexer.getData();
-            notice.setMessage(`Index complete: ${data ? Object.keys(data.references).length : 0} unique references`);
+            const wasAborted = this.indexer.wasAborted();
+            if (wasAborted) {
+                notice.setMessage('Indexing stopped.');
+            } else {
+                notice.setMessage(`Index complete: ${data ? Object.keys(data.references).length : 0} unique references`);
+            }
             setTimeout(() => notice.hide(), 2000);
             this.refreshConcordanceView();
             this.refreshSettings();
@@ -346,6 +376,8 @@ export default class ConversumPlugin extends Plugin {
             await this.logger?.error('Manual rebuild failed', e);
             notice.setMessage('Index rebuild failed. See conversum.log for details.');
             setTimeout(() => notice.hide(), 3000);
+        } finally {
+            this.rebuildNotice = null;
         }
     }
 
@@ -800,6 +832,32 @@ export default class ConversumPlugin extends Plugin {
             name: 'Open concordance',
             icon: 'book-open',
             callback: () => this.openConcordanceView()
+        });
+        this.addCommand({
+            id: 'stop-indexing',
+            name: 'Stop indexing',
+            icon: 'square',
+            callback: () => {
+                if (this.indexer?.isBusy()) {
+                    this.indexer.abort();
+                    new Notice('Stopping index rebuild...');
+                } else {
+                    new Notice('No indexing in progress');
+                }
+            }
+        });
+        this.addCommand({
+            id: 'reformat-all-references',
+            name: 'Reformat all references',
+            icon: 'text-cursor-input',
+            callback: async () => {
+                if (this.indexer?.isBusy()) {
+                    new Notice('Indexing or formatting is in progress. Wait for it to finish, then try again.');
+                    return;
+                }
+                await this.reformatAllReferences();
+                new Notice('Reformatting started in the background.');
+            }
         });
     }
 
