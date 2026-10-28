@@ -240,11 +240,12 @@ export class ConversumSettingTab extends PluginSettingTab {
                 button.setButtonText('Stop');
                 button.setWarning();
                 button.onClick(() => {
-                    if (this.plugin.indexer?.isIndexingBusy()) {
-                        this.plugin.indexer.abort();
-                        new Notice('Stopping index rebuild...');
+                    const indexer = this.plugin.indexer;
+                    if (indexer?.isIndexingBusy() || indexer?.isFormattingBusy()) {
+                        indexer.abort();
+                        new Notice('Stopping indexing/formatting...');
                     } else {
-                        new Notice('No index rebuild in progress.');
+                        new Notice('No indexing or formatting in progress.');
                     }
                     this.display();
                 });

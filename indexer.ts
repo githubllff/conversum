@@ -243,6 +243,9 @@ export class ScriptureIndexer {
             } catch (e) {
                 void this.plugin.getLogger()?.error('parseReferences error on chunk', e);
             }
+            if (this.abortRequested) {
+                break;
+            }
             if (i < chunks.length - 1) {
                 await new Promise((resolve) => window.setTimeout(resolve, 0));
             }
@@ -477,6 +480,13 @@ export class ScriptureIndexer {
                     // Ensure file_index row exists before inserting occurrences (FK constraint).
                     this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
                     const occurrences = await this.parseFileReferences(content);
+                    if (this.abortRequested) {
+                        this.db.rollbackTransaction();
+                        this.progress.status = 'idle';
+                        this.isIndexing = false;
+                        await this.plugin.getLogger()?.warn('Index rebuild aborted by user');
+                        return this.data;
+                    }
                     const fileRefs: string[] = [];
                     if (occurrences.length > 0) {
                         for (const occ of occurrences) {

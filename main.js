@@ -4264,6 +4264,9 @@ var ScriptureIndexer = class {
       } catch (e) {
         void this.plugin.getLogger()?.error("parseReferences error on chunk", e);
       }
+      if (this.abortRequested) {
+        break;
+      }
       if (i < chunks.length - 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
@@ -4480,6 +4483,13 @@ var ScriptureIndexer = class {
           const fileLanguage = this.getFileLanguage(content);
           this.db.upsertFileIndex(file.path, file.stat.mtime, fileLanguage);
           const occurrences = await this.parseFileReferences(content);
+          if (this.abortRequested) {
+            this.db.rollbackTransaction();
+            this.progress.status = "idle";
+            this.isIndexing = false;
+            await this.plugin.getLogger()?.warn("Index rebuild aborted by user");
+            return this.data;
+          }
           const fileRefs = [];
           if (occurrences.length > 0) {
             for (const occ of occurrences) {
@@ -5407,11 +5417,12 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
       button.setButtonText("Stop");
       button.setWarning();
       button.onClick(() => {
-        if (this.plugin.indexer?.isIndexingBusy()) {
-          this.plugin.indexer.abort();
-          new import_obsidian3.Notice("Stopping index rebuild...");
+        const indexer = this.plugin.indexer;
+        if (indexer?.isIndexingBusy() || indexer?.isFormattingBusy()) {
+          indexer.abort();
+          new import_obsidian3.Notice("Stopping indexing/formatting...");
         } else {
-          new import_obsidian3.Notice("No index rebuild in progress.");
+          new import_obsidian3.Notice("No indexing or formatting in progress.");
         }
         this.display();
       });
