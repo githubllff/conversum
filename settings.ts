@@ -233,6 +233,40 @@ export class ConversumSettingTab extends PluginSettingTab {
                 });
             });
 
+        new Setting(containerEl)
+            .setName('Stop indexing')
+            .setDesc('Abort an in-progress index rebuild.')
+            .addButton((button) => {
+                button.setButtonText('Stop');
+                button.setWarning();
+                button.onClick(() => {
+                    if (this.plugin.indexer?.isIndexingBusy()) {
+                        this.plugin.indexer.abort();
+                        new Notice('Stopping index rebuild...');
+                    } else {
+                        new Notice('No index rebuild in progress.');
+                    }
+                    this.display();
+                });
+            });
+
+        new Setting(containerEl)
+            .setName('Stop formatting')
+            .setDesc('Abort background formatting of reference names.')
+            .addButton((button) => {
+                button.setButtonText('Stop');
+                button.setWarning();
+                button.onClick(() => {
+                    if (this.plugin.indexer?.isFormattingBusy()) {
+                        this.plugin.indexer.abortFormatting();
+                        new Notice('Stopping formatting...');
+                    } else {
+                        new Notice('No formatting in progress.');
+                    }
+                    this.display();
+                });
+            });
+
         new Setting(containerEl).setName('Database').setHeading();
 
         new Setting(containerEl)

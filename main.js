@@ -5403,6 +5403,32 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
         new import_obsidian3.Notice("Reformatting started in the background.");
       });
     });
+    new import_obsidian3.Setting(containerEl).setName("Stop indexing").setDesc("Abort an in-progress index rebuild.").addButton((button) => {
+      button.setButtonText("Stop");
+      button.setWarning();
+      button.onClick(() => {
+        if (this.plugin.indexer?.isIndexingBusy()) {
+          this.plugin.indexer.abort();
+          new import_obsidian3.Notice("Stopping index rebuild...");
+        } else {
+          new import_obsidian3.Notice("No index rebuild in progress.");
+        }
+        this.display();
+      });
+    });
+    new import_obsidian3.Setting(containerEl).setName("Stop formatting").setDesc("Abort background formatting of reference names.").addButton((button) => {
+      button.setButtonText("Stop");
+      button.setWarning();
+      button.onClick(() => {
+        if (this.plugin.indexer?.isFormattingBusy()) {
+          this.plugin.indexer.abortFormatting();
+          new import_obsidian3.Notice("Stopping formatting...");
+        } else {
+          new import_obsidian3.Notice("No formatting in progress.");
+        }
+        this.display();
+      });
+    });
     new import_obsidian3.Setting(containerEl).setName("Database").setHeading();
     new import_obsidian3.Setting(containerEl).setName("Import compiled database").setDesc(
       'Replace the current index with a database compiled on another device, such as a desktop. Choose a .db file, or place it at the vault root as conversum-index.db and use "From vault". Files that match the imported index are marked as up to date so they are not reindexed.'
