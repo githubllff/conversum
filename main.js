@@ -4776,6 +4776,25 @@ var ScriptureIndexer = class {
   abort() {
     this.abortRequested = true;
     this.abortFormatting();
+    this.plugin.clearPendingIndexUpdates();
+  }
+  forceResetBusyState() {
+    this.isIndexing = false;
+    this.isFormatting = false;
+    this.abortRequested = false;
+    this.formattingAbortRequested = false;
+    if (this.formattingTimeout) {
+      clearTimeout(this.formattingTimeout);
+      this.formattingTimeout = null;
+    }
+    if (this.formattingNotice) {
+      try {
+        this.formattingNotice.hide();
+      } catch {
+      }
+      this.formattingNotice = null;
+    }
+    this.plugin.refreshSettings();
   }
   wasAborted() {
     return this.abortRequested;
@@ -5262,8 +5281,15 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
       text: `Unique references: ${refCount}`,
       cls: "conversum-status-item"
     });
+    const isIndexing = this.plugin.indexer?.isIndexingBusy() || false;
     const isFormatting = this.plugin.isFormattingBusy();
     const unformatted = this.plugin.getUnformattedCount();
+    if (isIndexing) {
+      statusEl.createEl("p", {
+        text: "Indexing in progress...",
+        cls: "conversum-status-item conversum-status-formatting"
+      });
+    }
     if (isFormatting) {
       statusEl.createEl("p", {
         text: `Formatting in progress... (${unformatted} remaining)`,
@@ -5437,6 +5463,14 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
         } else {
           new import_obsidian3.Notice("No formatting in progress.");
         }
+        this.display();
+      });
+    });
+    new import_obsidian3.Setting(containerEl).setName("Reset busy state").setDesc("Force-clear a stuck indexing/formatting state if Stop does not work. Use only if an operation appears hung.").addButton((button) => {
+      button.setButtonText("Reset");
+      button.setWarning();
+      button.onClick(() => {
+        this.plugin.forceResetBusyState();
         this.display();
       });
     });
@@ -6495,6 +6529,18 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
       this.settings.nameFormat
     );
     return decoded && decoded.length > 0 && decoded[0] ? decoded[0] : `${entry.startBcv}-${entry.endBcv}`;
+  }
+  forceResetBusyState() {
+    this.indexer?.forceResetBusyState();
+    this.clearPendingIndexUpdates();
+    new import_obsidian5.Notice("Busy state reset.");
+  }
+  clearPendingIndexUpdates() {
+    this.pendingFiles.clear();
+    if (this.rebuildTimeout) {
+      clearTimeout(this.rebuildTimeout);
+      this.rebuildTimeout = null;
+    }
   }
   async reformatAllReferences() {
     if (!this.indexer) return;

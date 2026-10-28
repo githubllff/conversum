@@ -45,8 +45,15 @@ export class ConversumSettingTab extends PluginSettingTab {
             text: `Unique references: ${refCount}`,
             cls: 'conversum-status-item'
         });
+        const isIndexing = this.plugin.indexer?.isIndexingBusy() || false;
         const isFormatting = this.plugin.isFormattingBusy();
         const unformatted = this.plugin.getUnformattedCount();
+        if (isIndexing) {
+            statusEl.createEl('p', {
+                text: 'Indexing in progress...',
+                cls: 'conversum-status-item conversum-status-formatting'
+            });
+        }
         if (isFormatting) {
             statusEl.createEl('p', {
                 text: `Formatting in progress... (${unformatted} remaining)`,
@@ -264,6 +271,18 @@ export class ConversumSettingTab extends PluginSettingTab {
                     } else {
                         new Notice('No formatting in progress.');
                     }
+                    this.display();
+                });
+            });
+
+        new Setting(containerEl)
+            .setName('Reset busy state')
+            .setDesc('Force-clear a stuck indexing/formatting state if Stop does not work. Use only if an operation appears hung.')
+            .addButton((button) => {
+                button.setButtonText('Reset');
+                button.setWarning();
+                button.onClick(() => {
+                    this.plugin.forceResetBusyState();
                     this.display();
                 });
             });

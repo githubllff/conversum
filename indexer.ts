@@ -790,6 +790,23 @@ export class ScriptureIndexer {
     abort(): void {
         this.abortRequested = true;
         this.abortFormatting();
+        this.plugin.clearPendingIndexUpdates();
+    }
+
+    forceResetBusyState(): void {
+        this.isIndexing = false;
+        this.isFormatting = false;
+        this.abortRequested = false;
+        this.formattingAbortRequested = false;
+        if (this.formattingTimeout) {
+            clearTimeout(this.formattingTimeout);
+            this.formattingTimeout = null;
+        }
+        if (this.formattingNotice) {
+            try { this.formattingNotice.hide(); } catch { }
+            this.formattingNotice = null;
+        }
+        this.plugin.refreshSettings();
     }
 
     wasAborted(): boolean {

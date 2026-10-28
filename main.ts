@@ -391,6 +391,20 @@ export default class ConversumPlugin extends Plugin {
         return decoded && decoded.length > 0 && decoded[0] ? decoded[0] : `${entry.startBcv}-${entry.endBcv}`;
     }
 
+    public forceResetBusyState(): void {
+        this.indexer?.forceResetBusyState();
+        this.clearPendingIndexUpdates();
+        new Notice('Busy state reset.');
+    }
+
+    public clearPendingIndexUpdates(): void {
+        this.pendingFiles.clear();
+        if (this.rebuildTimeout) {
+            clearTimeout(this.rebuildTimeout);
+            this.rebuildTimeout = null;
+        }
+    }
+
     public async reformatAllReferences(): Promise<void> {
         if (!this.indexer) return;
         const data = this.indexer.getData();
