@@ -5593,6 +5593,15 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
     window.setTimeout(cleanup, 12e4);
   }
   async importDatabaseFromVault() {
+    const indexer = this.plugin.indexer;
+    if (indexer) {
+      indexer.abort();
+      const start = Date.now();
+      while (indexer.isBusy() && Date.now() - start < 5e3) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+      }
+    }
+    this.plugin.forceResetBusyState();
     const path = "conversum-index.db";
     await this.runDatabaseImport(async () => {
       const adapter = this.plugin.app.vault.adapter;

@@ -375,6 +375,15 @@ export class ConversumSettingTab extends PluginSettingTab {
     }
 
     private async importDatabaseFromVault(): Promise<void> {
+        const indexer = this.plugin.indexer;
+        if (indexer) {
+            indexer.abort();
+            const start = Date.now();
+            while (indexer.isBusy() && Date.now() - start < 5000) {
+                await new Promise((resolve) => window.setTimeout(resolve, 100));
+            }
+        }
+        this.plugin.forceResetBusyState();
         const path = 'conversum-index.db';
         await this.runDatabaseImport(async () => {
             const adapter = this.plugin.app.vault.adapter;
