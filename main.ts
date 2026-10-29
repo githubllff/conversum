@@ -45,12 +45,7 @@ export default class ConversumPlugin extends Plugin {
             await this.logger.error('Failed to initialize engine:', e);
             new Notice('con[VER]sum: Failed to initialize engine.');
         }
-        window.setTimeout(() => {
-            try {
-                prewarmEngines(this.settings.sourceLanguage, this.settings.outputLanguage);
-            } catch {
-            }
-        }, 1000);
+        // Engines are created lazily to reduce baseline RAM on low-end devices.
 
         this.db = new IndexDatabase(this);
         await this.db.init();

@@ -86,10 +86,10 @@ export class IndexDatabase {
 
             // Retry briefly so a late-arriving synced database file can be picked
             // up instead of triggering an unnecessary full rebuild.
-            for (let attempt = 0; attempt < 3 && !dbData; attempt++) {
+            for (let attempt = 0; attempt < 2 && !dbData; attempt++) {
                 if (attempt > 0) {
-                    await this.plugin.getLogger()?.log(`Waiting for database file (attempt ${attempt + 1}/3)...`);
-                    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+                    await this.plugin.getLogger()?.log(`Waiting for database file (attempt ${attempt + 1}/2)...`);
+                    await new Promise((resolve) => window.setTimeout(resolve, 1000));
                 }
                 try {
                     const fileExists = await adapter.exists(dbPath);
@@ -617,7 +617,6 @@ export class IndexDatabase {
                     const filePath = row[columns.indexOf('file_path')] as string;
                     const lastModified = row[columns.indexOf('last_modified')] as number;
                     this.data.fileCache[filePath] = { 
-                        hash: '',
                         references: [],
                         lastModified 
                     };
@@ -799,8 +798,25 @@ export class IndexDatabase {
         }
     }
 
+    private saveTimer: number | null = null;
+
+    scheduleSave(delay: number = 2500): void {
+        if (!this.db) return;
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+        }
+        this.saveTimer = window.setTimeout(() => {
+            this.saveTimer = null;
+            void this.saveToDisk();
+        }, delay);
+    }
+
     async saveToDisk(): Promise<void> {
         if (!this.db) return;
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
         this.saveInProgress = this.saveInProgress
             .catch(() => {})
             .then(() => this.doSaveToDisk());
@@ -1208,18 +1224,19 @@ export class IndexDatabase {
             if (refResult.length === 0) return results;
             const columns = refResult[0].columns;
             const rows = refResult[0].values;
-            const rangeKeys = rows.map(row => `'${row[columns.indexOf('range_key')] as string}'`).join(',');
+            const rangeKeyValues = rows.map(row => row[columns.indexOf('range_key')] as string);
             const fileMap = new Map<string, Array<{path: string, occurrences: number}>>();
-            if (rangeKeys.length > 0) {
+            if (rangeKeyValues.length > 0) {
+                const placeholders = rangeKeyValues.map(() => '?').join(',');
                 const filesResult = this.db.exec(`
                     SELECT 
                         range_key,
                         file_path,
                         COUNT(*) as count
                     FROM ref_occurrences
-                    WHERE range_key IN (${rangeKeys})
+                    WHERE range_key IN (${placeholders})
                     GROUP BY range_key, file_path
-                `);
+                `, rangeKeyValues);
                 if (filesResult.length > 0) {
                     const fileColumns = filesResult[0].columns;
                     const fileRows = filesResult[0].values;

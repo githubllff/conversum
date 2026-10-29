@@ -6,9 +6,11 @@ import wasmBinary from './engine_bg.wasm';
 let engineInitialized = false;
 
 const enginePool = new Map<string, any>();
+let cachedLanguages: any[] | null = null;
 
 export function clearEnginePool(): void {
     enginePool.clear();
+    cachedLanguages = null;
 }
 
 export async function initEngine(): Promise<void> {
@@ -39,7 +41,16 @@ function getOrCreateEngine(
 ): any {
     const key = `${language}-${outputLanguage}-${format}`;
     if (enginePool.has(key)) {
-        return enginePool.get(key);
+        // LRU: move to end
+        const existing = enginePool.get(key);
+        enginePool.delete(key);
+        enginePool.set(key, existing);
+        return existing;
+    }
+    // Cap pool size to limit RAM on low-end devices.
+    if (enginePool.size >= 3) {
+        const oldestKey = enginePool.keys().next().value;
+        if (oldestKey) enginePool.delete(oldestKey);
     }
     try {
         const engine = new wasmModule.TravertureEngine(language, language, format, false);
@@ -136,11 +147,14 @@ export function getAvailableLanguages(): any[] {
     if (!engineInitialized) {
         return [];
     }
+    if (cachedLanguages) {
+        return cachedLanguages;
+    }
     
     try {
         const json = wasmModule.TravertureEngine.get_available_languages();
         const parsed = JSON.parse(json);
-        return parsed
+        cachedLanguages = parsed
             .filter((lang: any) => lang.code !== 'ase' && lang.language_code !== 'ase')
             .map((lang: any) => ({
                 code: lang.code || lang.language_code,
@@ -151,6 +165,7 @@ export function getAvailableLanguages(): any[] {
                 vernacularName: lang.language_name || lang.vernacularName || lang.languageName,
                 englishName: lang.english_name || lang.englishName
             }));
+        return cachedLanguages;
     } catch {
         return [];
     }

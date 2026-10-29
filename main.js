@@ -2593,8 +2593,10 @@ var engine_bg_default = __toBinary("AGFzbQEAAAAB8wIqYAN/f38Bf2ACf38Bf2ACf38AYAF/
 // engine-wrapper.ts
 var engineInitialized = false;
 var enginePool = /* @__PURE__ */ new Map();
+var cachedLanguages = null;
 function clearEnginePool() {
   enginePool.clear();
+  cachedLanguages = null;
 }
 async function initEngine() {
   if (engineInitialized) return;
@@ -2606,17 +2608,17 @@ async function initEngine() {
     throw e;
   }
 }
-function prewarmEngines(sourceLanguage, outputLanguage) {
-  if (!engineInitialized) return;
-  const formats = ["full", "standard", "official"];
-  for (const format of formats) {
-    getOrCreateEngine(sourceLanguage, outputLanguage, format);
-  }
-}
 function getOrCreateEngine(language, outputLanguage, format) {
   const key = `${language}-${outputLanguage}-${format}`;
   if (enginePool.has(key)) {
-    return enginePool.get(key);
+    const existing = enginePool.get(key);
+    enginePool.delete(key);
+    enginePool.set(key, existing);
+    return existing;
+  }
+  if (enginePool.size >= 3) {
+    const oldestKey = enginePool.keys().next().value;
+    if (oldestKey) enginePool.delete(oldestKey);
   }
   try {
     const engine = new TravertureEngine(language, language, format, false);
@@ -2686,10 +2688,13 @@ function getAvailableLanguages() {
   if (!engineInitialized) {
     return [];
   }
+  if (cachedLanguages) {
+    return cachedLanguages;
+  }
   try {
     const json = TravertureEngine.get_available_languages();
     const parsed = JSON.parse(json);
-    return parsed.filter((lang) => lang.code !== "ase" && lang.language_code !== "ase").map((lang) => ({
+    cachedLanguages = parsed.filter((lang) => lang.code !== "ase" && lang.language_code !== "ase").map((lang) => ({
       code: lang.code || lang.language_code,
       language_code: lang.code || lang.language_code,
       suffix: lang.symbol || lang.suffix || "",
@@ -2698,6 +2703,7 @@ function getAvailableLanguages() {
       vernacularName: lang.language_name || lang.vernacularName || lang.languageName,
       englishName: lang.english_name || lang.englishName
     }));
+    return cachedLanguages;
   } catch {
     return [];
   }
@@ -2787,6 +2793,7 @@ var IndexDatabase = class {
     };
     this.inTransaction = false;
     this.saveInProgress = Promise.resolve();
+    this.saveTimer = null;
     this.plugin = plugin;
   }
   // ============================================================
@@ -2822,10 +2829,10 @@ var IndexDatabase = class {
       }
       let dbData = null;
       let loadedFromBackup = false;
-      for (let attempt = 0; attempt < 3 && !dbData; attempt++) {
+      for (let attempt = 0; attempt < 2 && !dbData; attempt++) {
         if (attempt > 0) {
-          await this.plugin.getLogger()?.log(`Waiting for database file (attempt ${attempt + 1}/3)...`);
-          await new Promise((resolve) => window.setTimeout(resolve, 2e3));
+          await this.plugin.getLogger()?.log(`Waiting for database file (attempt ${attempt + 1}/2)...`);
+          await new Promise((resolve) => window.setTimeout(resolve, 1e3));
         }
         try {
           const fileExists = await adapter.exists(dbPath);
@@ -3329,7 +3336,6 @@ var IndexDatabase = class {
           const filePath = row[columns.indexOf("file_path")];
           const lastModified = row[columns.indexOf("last_modified")];
           this.data.fileCache[filePath] = {
-            hash: "",
             references: [],
             lastModified
           };
@@ -3489,8 +3495,22 @@ var IndexDatabase = class {
       }
     }
   }
+  scheduleSave(delay = 2500) {
+    if (!this.db) return;
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+    }
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      void this.saveToDisk();
+    }, delay);
+  }
   async saveToDisk() {
     if (!this.db) return;
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     this.saveInProgress = this.saveInProgress.catch(() => {
     }).then(() => this.doSaveToDisk());
     return this.saveInProgress;
@@ -3841,18 +3861,19 @@ var IndexDatabase = class {
       if (refResult.length === 0) return results;
       const columns = refResult[0].columns;
       const rows = refResult[0].values;
-      const rangeKeys = rows.map((row) => `'${row[columns.indexOf("range_key")]}'`).join(",");
+      const rangeKeyValues = rows.map((row) => row[columns.indexOf("range_key")]);
       const fileMap = /* @__PURE__ */ new Map();
-      if (rangeKeys.length > 0) {
+      if (rangeKeyValues.length > 0) {
+        const placeholders = rangeKeyValues.map(() => "?").join(",");
         const filesResult = this.db.exec(`
                     SELECT 
                         range_key,
                         file_path,
                         COUNT(*) as count
                     FROM ref_occurrences
-                    WHERE range_key IN (${rangeKeys})
+                    WHERE range_key IN (${placeholders})
                     GROUP BY range_key, file_path
-                `);
+                `, rangeKeyValues);
         if (filesResult.length > 0) {
           const fileColumns = filesResult[0].columns;
           const fileRows = filesResult[0].values;
@@ -4490,7 +4511,6 @@ var ScriptureIndexer = class {
       this.db.beginTransaction();
       const referenceMap = /* @__PURE__ */ new Map();
       const fileCache = {};
-      const uniqueRefs = /* @__PURE__ */ new Set();
       let processedCount = 0;
       for (const file of filteredFiles) {
         if (this.abortRequested) {
@@ -4531,7 +4551,6 @@ var ScriptureIndexer = class {
               const key = getRangeKey(occ.startBcv, occ.endBcv);
               fileRefs.push(key);
               this.progress.referencesFound++;
-              uniqueRefs.add(key);
               this.db.insertOccurrence(
                 key,
                 file.path,
@@ -4571,7 +4590,6 @@ var ScriptureIndexer = class {
             }
           }
           fileCache[file.path] = {
-            hash: "",
             references: fileRefs,
             lastModified: file.stat.mtime
           };
@@ -4580,7 +4598,7 @@ var ScriptureIndexer = class {
         }
         processedCount++;
         this.progress.processedFiles = processedCount;
-        this.progress.uniqueReferences = uniqueRefs.size;
+        this.progress.uniqueReferences = referenceMap.size;
         onProgress?.(this.progress);
       }
       const newData = this.getEmptyData();
@@ -4602,9 +4620,9 @@ var ScriptureIndexer = class {
       await this.plugin.getLogger()?.log(
         `Database verification: ${dbRefCount} refs, ${dbOccurrenceCount} occurrences, ${dbFileCount} files on disk`
       );
-      if (dbRefCount !== uniqueRefs.size || dbOccurrenceCount !== this.progress.referencesFound) {
+      if (dbRefCount !== referenceMap.size || dbOccurrenceCount !== this.progress.referencesFound) {
         await this.plugin.getLogger()?.error(
-          `Index mismatch: memory has ${uniqueRefs.size} refs/${this.progress.referencesFound} occurrences, DB has ${dbRefCount}/${dbOccurrenceCount}`
+          `Index mismatch: memory has ${referenceMap.size} refs/${this.progress.referencesFound} occurrences, DB has ${dbRefCount}/${dbOccurrenceCount}`
         );
       }
       try {
@@ -4711,16 +4729,16 @@ var ScriptureIndexer = class {
           }
         }
         this.data.fileCache[file.path] = {
-          hash: "",
           references: fileRefs,
           lastModified: file.stat.mtime
         };
         this.data.lastUpdated = Date.now();
         this.db.setData(this.data);
-        await this.db.commitTransaction(true);
+        await this.db.commitTransaction(false);
         this.db.beginTransaction();
         this.db.cleanupOrphans();
-        await this.db.commitTransaction(true);
+        await this.db.commitTransaction(false);
+        this.db.scheduleSave();
         if (occurrences.length > 0 && !skipFormatting) {
           this.startBackgroundFormatting();
         }
@@ -4765,7 +4783,8 @@ var ScriptureIndexer = class {
       this.db.setData(this.data);
       this.db.deleteFileReferences(filePath);
       this.db.cleanupOrphans();
-      await this.db.commitTransaction(true);
+      await this.db.commitTransaction(false);
+      this.db.scheduleSave();
     } catch (e) {
       this.db.rollbackTransaction();
       void this.plugin.getLogger()?.error(`Failed to remove file ${filePath}`, e);
@@ -5837,8 +5856,7 @@ var ConcordanceView = class extends import_obsidian4.ItemView {
           } else {
             displayText = this.formatReference(entry);
           }
-          const filesWithCounts = this.plugin.getDatabase()?.getFilesWithCounts(key) || [];
-          const filesArray = filesWithCounts.map((f) => ({
+          const filesArray = (entry.files || []).map((f) => ({
             path: f.path,
             occurrences: f.occurrences
           }));
@@ -6048,7 +6066,7 @@ var ConcordanceView = class extends import_obsidian4.ItemView {
     }
   }
   createReferenceElement(ref) {
-    const refEl = this.container.createDiv();
+    const refEl = document.createElement("div");
     refEl.className = ref.isWholeBook ? "conversum-reference" : "conversum-reference";
     const displayText = ref.formattedText || ref.referenceKey;
     refEl.createSpan({ cls: "conversum-ref-text", text: displayText });
@@ -6284,12 +6302,6 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
       await this.logger.error("Failed to initialize engine:", e);
       new import_obsidian5.Notice("con[VER]sum: Failed to initialize engine.");
     }
-    window.setTimeout(() => {
-      try {
-        prewarmEngines(this.settings.sourceLanguage, this.settings.outputLanguage);
-      } catch {
-      }
-    }, 1e3);
     this.db = new IndexDatabase(this);
     await this.db.init();
     this.initIndexer();

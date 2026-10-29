@@ -188,8 +188,7 @@ export class ConcordanceView extends ItemView {
                     } else {
                         displayText = this.formatReference(entry);
                     }
-                    const filesWithCounts = this.plugin.getDatabase()?.getFilesWithCounts(key) || [];
-                    const filesArray = filesWithCounts.map(f => ({
+                    const filesArray = (entry.files || []).map(f => ({
                         path: f.path,
                         occurrences: f.occurrences
                     }));
@@ -406,7 +405,7 @@ export class ConcordanceView extends ItemView {
     }
 
     private createReferenceElement(ref: ReferenceGroup): HTMLElement {
-        const refEl = this.container.createDiv();
+        const refEl = document.createElement('div');
         refEl.className = ref.isWholeBook ? 'conversum-reference' : 'conversum-reference';
         const displayText = ref.formattedText || ref.referenceKey;
         refEl.createSpan({ cls: 'conversum-ref-text', text: displayText });

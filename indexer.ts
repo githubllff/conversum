@@ -447,7 +447,6 @@ export class ScriptureIndexer {
             this.db.beginTransaction();
             const referenceMap = new Map<string, ReferenceIndexEntry>();
             const fileCache: { [filePath: string]: FileCacheEntry } = {};
-            const uniqueRefs = new Set<string>();
             let processedCount = 0;
 
             for (const file of filteredFiles) {
@@ -493,7 +492,6 @@ export class ScriptureIndexer {
                             const key = getRangeKey(occ.startBcv, occ.endBcv);
                             fileRefs.push(key);
                             this.progress.referencesFound++;
-                            uniqueRefs.add(key);
                             this.db.insertOccurrence(
                                 key,
                                 file.path,
@@ -533,7 +531,6 @@ export class ScriptureIndexer {
                         }
                     }
                     fileCache[file.path] = {
-                        hash: '',
                         references: fileRefs,
                         lastModified: file.stat.mtime
                     };
@@ -542,7 +539,7 @@ export class ScriptureIndexer {
                 }
                 processedCount++;
                 this.progress.processedFiles = processedCount;
-                this.progress.uniqueReferences = uniqueRefs.size;
+                this.progress.uniqueReferences = referenceMap.size;
                 onProgress?.(this.progress);
             }
 
@@ -569,9 +566,9 @@ export class ScriptureIndexer {
             await this.plugin.getLogger()?.log(
                 `Database verification: ${dbRefCount} refs, ${dbOccurrenceCount} occurrences, ${dbFileCount} files on disk`
             );
-            if (dbRefCount !== uniqueRefs.size || dbOccurrenceCount !== this.progress.referencesFound) {
+            if (dbRefCount !== referenceMap.size || dbOccurrenceCount !== this.progress.referencesFound) {
                 await this.plugin.getLogger()?.error(
-                    `Index mismatch: memory has ${uniqueRefs.size} refs/${this.progress.referencesFound} occurrences, ` +
+                    `Index mismatch: memory has ${referenceMap.size} refs/${this.progress.referencesFound} occurrences, ` +
                     `DB has ${dbRefCount}/${dbOccurrenceCount}`
                 );
             }
@@ -682,16 +679,16 @@ export class ScriptureIndexer {
                     }
                 }
                 this.data.fileCache[file.path] = {
-                    hash: '',
                     references: fileRefs,
                     lastModified: file.stat.mtime
                 };
                 this.data.lastUpdated = Date.now();
                 this.db.setData(this.data);
-                await this.db.commitTransaction(true);
+                await this.db.commitTransaction(false);
                 this.db.beginTransaction();
                 this.db.cleanupOrphans();
-                await this.db.commitTransaction(true);
+                await this.db.commitTransaction(false);
+                this.db.scheduleSave();
                 if (occurrences.length > 0 && !skipFormatting) {
                     this.startBackgroundFormatting();
                 }
@@ -737,7 +734,8 @@ export class ScriptureIndexer {
             this.db.setData(this.data);
             this.db.deleteFileReferences(filePath);
             this.db.cleanupOrphans();
-            await this.db.commitTransaction(true);
+            await this.db.commitTransaction(false);
+            this.db.scheduleSave();
         } catch (e) {
             this.db.rollbackTransaction();
             void this.plugin.getLogger()?.error(`Failed to remove file ${filePath}`, e);
