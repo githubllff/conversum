@@ -199,7 +199,7 @@ export class ConcordanceView extends ItemView {
                         endVerse: entry.bcv.endVerse,
                         totalFiles: filesArray.length,
                         totalOccurrences: filesArray.reduce((sum, f) => sum + f.occurrences, 0),
-                        files: filesArray,
+                        files: [],
                         expanded: true,
                         formattedText: displayText,
                         _searchText: displayText,
@@ -411,8 +411,10 @@ export class ConcordanceView extends ItemView {
         refEl.createSpan({ cls: 'conversum-ref-text', text: displayText });
         refEl.createSpan({ cls: 'conversum-ref-separator', text: ' — ' });
         const filesContainer = refEl.createDiv({ cls: 'conversum-files-inline' });
-        for (let i = 0; i < ref.files.length; i++) {
-            const file = ref.files[i];
+        const files = this.plugin.getDatabase()?.getFilesWithCounts(ref.referenceKey) || [];
+        files.sort((a, b) => a.path.localeCompare(b.path));
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
             const unit = filesContainer.createSpan();
             const link = unit.createEl('a', {
                 cls: 'conversum-file-link',
@@ -433,7 +435,7 @@ export class ConcordanceView extends ItemView {
                 }
             });
             unit.createSpan({ cls: 'conversum-file-count', text: ' (' + file.occurrences + ')' });
-            if (i < ref.files.length - 1) {
+            if (i < files.length - 1) {
                 unit.createSpan({ text: '; ' });
             }
         }
