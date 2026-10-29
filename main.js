@@ -2779,6 +2779,51 @@ function getConversumDeviceId() {
     return "default";
   }
 }
+async function compressGzip(data) {
+  if (typeof CompressionStream === "undefined") return data;
+  const stream = new CompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  await writer.write(data);
+  await writer.close();
+  const reader = stream.readable.getReader();
+  const chunks = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+async function decompressGzip(data) {
+  if (data.length < 2 || data[0] !== 31 || data[1] !== 139) return data;
+  if (typeof DecompressionStream === "undefined") return data;
+  const stream = new DecompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  await writer.write(data);
+  await writer.close();
+  const reader = stream.readable.getReader();
+  const chunks = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
 var DB_NAME = `conversum-index.${getConversumDeviceId()}.db`;
 var IndexDatabase = class {
   constructor(plugin) {
@@ -2838,7 +2883,7 @@ var IndexDatabase = class {
           const fileExists = await adapter.exists(dbPath);
           if (fileExists) {
             const fileContent = await adapter.readBinary(dbPath);
-            const candidate = new Uint8Array(fileContent);
+            const candidate = await decompressGzip(new Uint8Array(fileContent));
             try {
               const testDb = new this.SQL.Database(candidate);
               testDb.close();
@@ -2859,7 +2904,7 @@ var IndexDatabase = class {
             const backupExists = await adapter.exists(backupPath);
             if (backupExists) {
               const fileContent = await adapter.readBinary(backupPath);
-              const candidate = new Uint8Array(fileContent);
+              const candidate = await decompressGzip(new Uint8Array(fileContent));
               const testDb = new this.SQL.Database(candidate);
               testDb.close();
               dbData = candidate;
@@ -2975,7 +3020,8 @@ var IndexDatabase = class {
     if (!await adapter.exists(backupPath)) {
       throw new Error("No backup database found");
     }
-    const bytes = await adapter.readBinary(backupPath);
+    const rawBytes = await adapter.readBinary(backupPath);
+    const bytes = await decompressGzip(new Uint8Array(rawBytes));
     const counts = this.validateDatabaseBytes(bytes);
     if (await adapter.exists(dbPath)) {
       try {
@@ -2983,7 +3029,8 @@ var IndexDatabase = class {
       } catch {
       }
     }
-    await adapter.writeBinary(dbPath, bytes);
+    const compressed = await compressGzip(bytes);
+    await adapter.writeBinary(dbPath, compressed);
     await this.reloadFromDisk();
     return counts;
   }
@@ -3026,7 +3073,9 @@ var IndexDatabase = class {
     if (!await adapter.exists(dbPath)) {
       return null;
     }
-    return await adapter.readBinary(dbPath);
+    const raw = await adapter.readBinary(dbPath);
+    const bytes = await decompressGzip(new Uint8Array(raw));
+    return bytes.buffer;
   }
   /**
    * Validate an external SQLite file before importing it. This checks the
@@ -3157,7 +3206,8 @@ var IndexDatabase = class {
     const dbPath = `${dir}/${DB_NAME}`;
     const tmpPath = `${dir}/${DB_NAME}.import.tmp`;
     const importBackupPath = `${dir}/${DB_NAME}.before-import`;
-    await adapter.writeBinary(tmpPath, bytes);
+    const compressed = await compressGzip(new Uint8Array(bytes));
+    await adapter.writeBinary(tmpPath, compressed);
     let oldDatabaseMoved = false;
     try {
       if (await adapter.exists(importBackupPath)) {
@@ -3464,7 +3514,8 @@ var IndexDatabase = class {
       writeMetadata();
       const dbData = this.db.export();
       this.ensureForeignKeys();
-      await adapter.writeBinary(tmpPath, dbData);
+      const compressed = await compressGzip(dbData);
+      await adapter.writeBinary(tmpPath, compressed);
       const mainExists = await adapter.exists(dbPath);
       if (mainExists) {
         if (await adapter.exists(backupPath)) {
@@ -3489,7 +3540,8 @@ var IndexDatabase = class {
         writeMetadata();
         const dbData = this.db.export();
         this.ensureForeignKeys();
-        await adapter.writeBinary(dbPath, dbData);
+        const compressed = await compressGzip(dbData);
+        await adapter.writeBinary(dbPath, compressed);
       } catch (e2) {
         console.error("con[VER]sum: Failed to save database to disk:", e2);
       }

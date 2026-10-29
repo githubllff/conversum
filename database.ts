@@ -23,6 +23,53 @@ function getConversumDeviceId(): string {
     }
 }
 
+async function compressGzip(data: Uint8Array): Promise<Uint8Array> {
+    if (typeof CompressionStream === 'undefined') return data;
+    const stream = new CompressionStream('gzip');
+    const writer = stream.writable.getWriter();
+    await writer.write(data);
+    await writer.close();
+    const reader = stream.readable.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+    }
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+        out.set(c, off);
+        off += c.length;
+    }
+    return out;
+}
+
+async function decompressGzip(data: Uint8Array): Promise<Uint8Array> {
+    if (data.length < 2 || data[0] !== 0x1f || data[1] !== 0x8b) return data;
+    if (typeof DecompressionStream === 'undefined') return data;
+    const stream = new DecompressionStream('gzip');
+    const writer = stream.writable.getWriter();
+    await writer.write(data);
+    await writer.close();
+    const reader = stream.readable.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+    }
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+        out.set(c, off);
+        off += c.length;
+    }
+    return out;
+}
+
 const DB_NAME = `conversum-index.${getConversumDeviceId()}.db`;
 
 export class IndexDatabase {
@@ -95,7 +142,7 @@ export class IndexDatabase {
                     const fileExists = await adapter.exists(dbPath);
                     if (fileExists) {
                         const fileContent = await adapter.readBinary(dbPath);
-                        const candidate = new Uint8Array(fileContent);
+                        const candidate = await decompressGzip(new Uint8Array(fileContent));
                         try {
                             const testDb = new this.SQL.Database(candidate);
                             testDb.close();
@@ -117,7 +164,7 @@ export class IndexDatabase {
                         const backupExists = await adapter.exists(backupPath);
                         if (backupExists) {
                             const fileContent = await adapter.readBinary(backupPath);
-                            const candidate = new Uint8Array(fileContent);
+                            const candidate = await decompressGzip(new Uint8Array(fileContent));
                             const testDb = new this.SQL.Database(candidate);
                             testDb.close();
                             dbData = candidate;
@@ -233,7 +280,8 @@ export class IndexDatabase {
             throw new Error('No backup database found');
         }
 
-        const bytes = await adapter.readBinary(backupPath);
+        const rawBytes = await adapter.readBinary(backupPath);
+        const bytes = await decompressGzip(new Uint8Array(rawBytes));
         const counts = this.validateDatabaseBytes(bytes);
 
         if (await adapter.exists(dbPath)) {
@@ -242,7 +290,8 @@ export class IndexDatabase {
             } catch {
             }
         }
-        await adapter.writeBinary(dbPath, bytes);
+        const compressed = await compressGzip(bytes);
+        await adapter.writeBinary(dbPath, compressed);
 
         await this.reloadFromDisk();
         return counts;
@@ -287,7 +336,9 @@ export class IndexDatabase {
         if (!(await adapter.exists(dbPath))) {
             return null;
         }
-        return await adapter.readBinary(dbPath);
+        const raw = await adapter.readBinary(dbPath);
+        const bytes = await decompressGzip(new Uint8Array(raw));
+        return bytes.buffer as ArrayBuffer;
     }
 
     /**
@@ -426,7 +477,8 @@ export class IndexDatabase {
         const tmpPath = `${dir}/${DB_NAME}.import.tmp`;
         const importBackupPath = `${dir}/${DB_NAME}.before-import`;
 
-        await adapter.writeBinary(tmpPath, bytes);
+        const compressed = await compressGzip(new Uint8Array(bytes));
+        await adapter.writeBinary(tmpPath, compressed);
 
         let oldDatabaseMoved = false;
         try {
@@ -761,7 +813,8 @@ export class IndexDatabase {
             const dbData = this.db.export();
             this.ensureForeignKeys();
 
-            await adapter.writeBinary(tmpPath, dbData as any);
+            const compressed = await compressGzip(dbData as Uint8Array);
+            await adapter.writeBinary(tmpPath, compressed as any);
 
             const mainExists = await adapter.exists(dbPath);
             if (mainExists) {
@@ -791,7 +844,8 @@ export class IndexDatabase {
                 writeMetadata();
                 const dbData = this.db.export();
                 this.ensureForeignKeys();
-                await adapter.writeBinary(dbPath, dbData as any);
+                const compressed = await compressGzip(dbData as Uint8Array);
+                await adapter.writeBinary(dbPath, compressed as any);
             } catch (e2) {
                 console.error('con[VER]sum: Failed to save database to disk:', e2);
             }
