@@ -427,7 +427,29 @@ export class ConcordanceView extends ItemView {
                 if (path) {
                     const fileObj = this.app.vault.getAbstractFileByPath(path);
                     if (fileObj instanceof TFile) {
-                        await this.app.workspace.openLinkText(path, '');
+                        // Try to jump to the line containing this reference
+                        // instead of just opening the note at the top.
+                        const needle = (ref.formattedText || displayText || '').trim();
+                        let line = 0;
+                        if (needle) {
+                            try {
+                                const content = await this.app.vault.read(fileObj);
+                                const idx = content.indexOf(needle);
+                                if (idx >= 0) {
+                                    line = content.substring(0, idx).split('\\n').length - 1;
+                                } else {
+                                    // Fall back to a looser search on the first word
+                                    const firstWord = needle.split(/\\s+/)[0];
+                                    const idx2 = firstWord ? content.indexOf(firstWord) : -1;
+                                    if (idx2 >= 0) {
+                                        line = content.substring(0, idx2).split('\\n').length - 1;
+                                    }
+                                }
+                            } catch {
+                            }
+                        }
+                        const leaf = this.app.workspace.getLeaf(false);
+                        await leaf.openFile(fileObj, { eState: { line } });
                     } else {
                         new Notice(`File not found: ${path}`);
                     }

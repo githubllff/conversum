@@ -308,7 +308,7 @@ export class ScriptureIndexer {
         this.plugin.refreshSettings();
 
         const remaining = this.db.getUnformattedCount();
-        const notice = new Notice(`Formatting references... (${remaining} remaining)`, 0);
+        const notice = new Notice(`Formatting references... (${remaining} remaining)`, 4000);
         this.formattingNotice = notice;
         const stopBtn = notice.messageEl.createEl('button', { text: 'Stop formatting' });
         stopBtn.style.marginLeft = '10px';

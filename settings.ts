@@ -246,11 +246,18 @@ export class ConversumSettingTab extends PluginSettingTab {
             .addButton((button) => {
                 button.setButtonText('Stop');
                 button.setWarning();
-                button.onClick(() => {
+                button.onClick(async () => {
                     const indexer = this.plugin.indexer;
                     if (indexer?.isIndexingBusy() || indexer?.isFormattingBusy()) {
                         indexer.abort();
-                        new Notice('Stopping indexing/formatting...');
+                        const start = Date.now();
+                        while (indexer.isBusy() && Date.now() - start < 5000) {
+                            await new Promise((resolve) => window.setTimeout(resolve, 100));
+                        }
+                        if (indexer.isBusy()) {
+                            this.plugin.forceResetBusyState();
+                        }
+                        new Notice('Stopped.');
                     } else {
                         new Notice('No indexing or formatting in progress.');
                     }
@@ -379,9 +386,16 @@ export class ConversumSettingTab extends PluginSettingTab {
     }
 
     private async runDatabaseImport(load: () => Promise<ArrayBuffer>): Promise<void> {
-        if (this.plugin.indexer?.isBusy()) {
-            new Notice('Indexing or formatting is in progress. Wait for it to finish, then try again.');
-            return;
+        const indexer = this.plugin.indexer;
+        if (indexer?.isBusy()) {
+            indexer.abort();
+            const start = Date.now();
+            while (indexer.isBusy() && Date.now() - start < 5000) {
+                await new Promise((resolve) => window.setTimeout(resolve, 100));
+            }
+            if (indexer.isBusy()) {
+                this.plugin.forceResetBusyState();
+            }
         }
 
         const notice = new Notice('Importing database...', 0);

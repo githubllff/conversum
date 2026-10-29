@@ -4359,7 +4359,7 @@ var ScriptureIndexer = class {
     this.formattingAbortRequested = false;
     this.plugin.refreshSettings();
     const remaining = this.db.getUnformattedCount();
-    const notice = new import_obsidian.Notice(`Formatting references... (${remaining} remaining)`, 0);
+    const notice = new import_obsidian.Notice(`Formatting references... (${remaining} remaining)`, 4e3);
     this.formattingNotice = notice;
     const stopBtn = notice.messageEl.createEl("button", { text: "Stop formatting" });
     stopBtn.style.marginLeft = "10px";
@@ -5477,11 +5477,18 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("Stop indexing").setDesc("Abort an in-progress index rebuild.").addButton((button) => {
       button.setButtonText("Stop");
       button.setWarning();
-      button.onClick(() => {
+      button.onClick(async () => {
         const indexer = this.plugin.indexer;
         if (indexer?.isIndexingBusy() || indexer?.isFormattingBusy()) {
           indexer.abort();
-          new import_obsidian3.Notice("Stopping indexing/formatting...");
+          const start = Date.now();
+          while (indexer.isBusy() && Date.now() - start < 5e3) {
+            await new Promise((resolve) => window.setTimeout(resolve, 100));
+          }
+          if (indexer.isBusy()) {
+            this.plugin.forceResetBusyState();
+          }
+          new import_obsidian3.Notice("Stopped.");
         } else {
           new import_obsidian3.Notice("No indexing or formatting in progress.");
         }
@@ -5577,9 +5584,16 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
     });
   }
   async runDatabaseImport(load) {
-    if (this.plugin.indexer?.isBusy()) {
-      new import_obsidian3.Notice("Indexing or formatting is in progress. Wait for it to finish, then try again.");
-      return;
+    const indexer = this.plugin.indexer;
+    if (indexer?.isBusy()) {
+      indexer.abort();
+      const start = Date.now();
+      while (indexer.isBusy() && Date.now() - start < 5e3) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+      }
+      if (indexer.isBusy()) {
+        this.plugin.forceResetBusyState();
+      }
     }
     const notice = new import_obsidian3.Notice("Importing database...", 0);
     try {
@@ -6055,7 +6069,26 @@ var ConcordanceView = class extends import_obsidian4.ItemView {
         if (path) {
           const fileObj = this.app.vault.getAbstractFileByPath(path);
           if (fileObj instanceof import_obsidian4.TFile) {
-            await this.app.workspace.openLinkText(path, "");
+            const needle = (ref.formattedText || displayText || "").trim();
+            let line = 0;
+            if (needle) {
+              try {
+                const content = await this.app.vault.read(fileObj);
+                const idx = content.indexOf(needle);
+                if (idx >= 0) {
+                  line = content.substring(0, idx).split("\\n").length - 1;
+                } else {
+                  const firstWord = needle.split(/\\s+/)[0];
+                  const idx2 = firstWord ? content.indexOf(firstWord) : -1;
+                  if (idx2 >= 0) {
+                    line = content.substring(0, idx2).split("\\n").length - 1;
+                  }
+                }
+              } catch {
+              }
+            }
+            const leaf = this.app.workspace.getLeaf(false);
+            await leaf.openFile(fileObj, { eState: { line } });
           } else {
             new import_obsidian4.Notice(`File not found: ${path}`);
           }
