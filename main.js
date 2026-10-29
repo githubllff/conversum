@@ -2803,7 +2803,7 @@ async function compressGzip(data) {
     return out;
   })();
   const timeoutPromise = new Promise((resolve) => {
-    window.setTimeout(() => resolve(data), 3e3);
+    window.setTimeout(() => resolve(data), 1e4);
   });
   try {
     return await Promise.race([compressPromise, timeoutPromise]);
@@ -2836,7 +2836,7 @@ async function decompressGzip(data) {
     return out;
   })();
   const timeoutPromise = new Promise((resolve) => {
-    window.setTimeout(() => resolve(data), 3e3);
+    window.setTimeout(() => resolve(data), 1e4);
   });
   try {
     return await Promise.race([decompressPromise, timeoutPromise]);
@@ -3535,6 +3535,7 @@ var IndexDatabase = class {
       const dbData = this.db.export();
       this.ensureForeignKeys();
       const compressed = await compressGzip(dbData);
+      await this.plugin.getLogger()?.log(`Saved DB: ${dbData.byteLength} -> ${compressed.byteLength} bytes`);
       await adapter.writeBinary(tmpPath, compressed);
       const mainExists = await adapter.exists(dbPath);
       if (mainExists) {

@@ -47,7 +47,7 @@ async function compressGzip(data: Uint8Array): Promise<Uint8Array> {
         return out;
     })();
     const timeoutPromise = new Promise<Uint8Array>((resolve) => {
-        window.setTimeout(() => resolve(data), 3000);
+        window.setTimeout(() => resolve(data), 10000);
     });
     try {
         return await Promise.race([compressPromise, timeoutPromise]);
@@ -81,7 +81,7 @@ async function decompressGzip(data: Uint8Array): Promise<Uint8Array> {
         return out;
     })();
     const timeoutPromise = new Promise<Uint8Array>((resolve) => {
-        window.setTimeout(() => resolve(data), 3000);
+        window.setTimeout(() => resolve(data), 10000);
     });
     try {
         return await Promise.race([decompressPromise, timeoutPromise]);
@@ -834,6 +834,7 @@ export class IndexDatabase {
             this.ensureForeignKeys();
 
             const compressed = await compressGzip(dbData as Uint8Array);
+            await this.plugin.getLogger()?.log(`Saved DB: ${dbData.byteLength} -> ${compressed.byteLength} bytes`);
             await adapter.writeBinary(tmpPath, compressed as any);
 
             const mainExists = await adapter.exists(dbPath);
