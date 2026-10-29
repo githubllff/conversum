@@ -6071,16 +6071,21 @@ var ConcordanceView = class extends import_obsidian4.ItemView {
           if (fileObj instanceof import_obsidian4.TFile) {
             const needle = (ref.formattedText || displayText || "").trim();
             let line = 0;
+            let col = 0;
+            let matchLen = 0;
             try {
               const content = await this.app.vault.read(fileObj);
               let idx = -1;
+              let found = "";
               if (needle) {
                 idx = content.indexOf(needle);
+                if (idx >= 0) found = needle;
               }
               if (idx < 0 && needle) {
                 const firstWord = needle.split(/\\s+/)[0];
                 if (firstWord && firstWord.length > 2) {
                   idx = content.indexOf(firstWord);
+                  if (idx >= 0) found = firstWord;
                 }
               }
               if (idx < 0) {
@@ -6092,16 +6097,39 @@ var ConcordanceView = class extends import_obsidian4.ItemView {
                   const m = content.match(re);
                   if (m && typeof m.index === "number") {
                     idx = m.index;
+                    found = m[0];
                   }
                 }
               }
               if (idx >= 0) {
-                line = content.substring(0, idx).split("\\n").length - 1;
+                const before = content.substring(0, idx);
+                const lines = before.split("\\n");
+                line = lines.length - 1;
+                col = lines[lines.length - 1].length;
+                matchLen = found ? found.length : 0;
               }
             } catch {
             }
             const leaf = this.app.workspace.getLeaf(false);
-            await leaf.openFile(fileObj, { eState: { line } });
+            await leaf.openFile(fileObj, { active: true, eState: { line, ch: col } });
+            const view = leaf.view;
+            if (view && view.editor) {
+              const editor = view.editor;
+              editor.setCursor({ line, ch: col });
+              if (matchLen > 0) {
+                editor.setSelection(
+                  { line, ch: col },
+                  { line, ch: col + matchLen }
+                );
+              }
+              try {
+                editor.scrollIntoView(
+                  { from: { line, ch: col }, to: { line, ch: col + matchLen } },
+                  true
+                );
+              } catch {
+              }
+            }
           } else {
             new import_obsidian4.Notice(`File not found: ${path}`);
           }

@@ -431,21 +431,24 @@ export class ConcordanceView extends ItemView {
                         // instead of just opening the note at the top.
                         const needle = (ref.formattedText || displayText || '').trim();
                         let line = 0;
+                        let col = 0;
+                        let matchLen = 0;
                         try {
                             const content = await this.app.vault.read(fileObj);
                             let idx = -1;
+                            let found = '';
                             if (needle) {
                                 idx = content.indexOf(needle);
+                                if (idx >= 0) found = needle;
                             }
                             if (idx < 0 && needle) {
                                 const firstWord = needle.split(/\\s+/)[0];
                                 if (firstWord && firstWord.length > 2) {
                                     idx = content.indexOf(firstWord);
+                                    if (idx >= 0) found = firstWord;
                                 }
                             }
                             if (idx < 0) {
-                                // Fall back to matching chapter:verse numbers, which is
-                                // robust against different book-name abbreviations.
                                 const startBcv = (ref.referenceKey || '').split('-')[0];
                                 const chapter = parseInt(startBcv.substring(2, 5), 10);
                                 const verse = parseInt(startBcv.substring(5, 8), 10);
@@ -454,16 +457,40 @@ export class ConcordanceView extends ItemView {
                                     const m = content.match(re);
                                     if (m && typeof m.index === 'number') {
                                         idx = m.index;
+                                        found = m[0];
                                     }
                                 }
                             }
                             if (idx >= 0) {
-                                line = content.substring(0, idx).split('\\n').length - 1;
+                                const before = content.substring(0, idx);
+                                const lines = before.split('\\n');
+                                line = lines.length - 1;
+                                col = lines[lines.length - 1].length;
+                                matchLen = found ? found.length : 0;
                             }
                         } catch {
                         }
                         const leaf = this.app.workspace.getLeaf(false);
-                        await leaf.openFile(fileObj, { eState: { line } });
+                        await leaf.openFile(fileObj, { active: true, eState: { line, ch: col } });
+                        // Ensure the cursor/selection is applied even if eState is ignored.
+                        const view = leaf.view as any;
+                        if (view && view.editor) {
+                            const editor = view.editor;
+                            editor.setCursor({ line, ch: col });
+                            if (matchLen > 0) {
+                                editor.setSelection(
+                                    { line, ch: col },
+                                    { line, ch: col + matchLen }
+                                );
+                            }
+                            try {
+                                editor.scrollIntoView(
+                                    { from: { line, ch: col }, to: { line, ch: col + matchLen } },
+                                    true
+                                );
+                            } catch {
+                            }
+                        }
                     } else {
                         new Notice(`File not found: ${path}`);
                     }
