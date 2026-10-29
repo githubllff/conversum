@@ -503,16 +503,7 @@ export class ScriptureIndexer {
                                 occ.endVerse,
                                 occ.endChapter
                             );
-                            if (referenceMap.has(key)) {
-                                const entry = referenceMap.get(key)!;
-                                const existingFile = entry.files.find((f: { path: string }) => f.path === file.path);
-                                if (existingFile) {
-                                    existingFile.occurrences++;
-                                } else {
-                                    entry.files.push({ path: file.path, occurrences: 1 });
-                                }
-                                entry.totalOccurrences++;
-                            } else {
+                            if (!referenceMap.has(key)) {
                                 referenceMap.set(key, {
                                     startBcv: occ.startBcv,
                                     endBcv: occ.endBcv,
@@ -523,8 +514,8 @@ export class ScriptureIndexer {
                                         endVerse: occ.endVerse,
                                         endChapter: occ.endChapter
                                     },
-                                    files: [{ path: file.path, occurrences: 1 }],
-                                    totalOccurrences: 1
+                                    files: [],
+                                    totalOccurrences: 0
                                 });
                                 this.progress.uniqueReferences++;
                             }
@@ -653,16 +644,7 @@ export class ScriptureIndexer {
                         occ.endVerse,
                         occ.endChapter
                     );
-                    if (this.data.references[key]) {
-                        const entry = this.data.references[key];
-                        const existingFile = entry.files.find((f: { path: string }) => f.path === file.path);
-                        if (existingFile) {
-                            existingFile.occurrences++;
-                        } else {
-                            entry.files.push({ path: file.path, occurrences: 1 });
-                        }
-                        entry.totalOccurrences++;
-                    } else {
+                    if (!this.data.references[key]) {
                         this.data.references[key] = {
                             startBcv: occ.startBcv,
                             endBcv: occ.endBcv,
@@ -673,8 +655,8 @@ export class ScriptureIndexer {
                                 endVerse: occ.endVerse,
                                 endChapter: occ.endChapter
                             },
-                            files: [{ path: file.path, occurrences: 1 }],
-                            totalOccurrences: 1
+                            files: [],
+                            totalOccurrences: 0
                         };
                     }
                 }
@@ -716,17 +698,8 @@ export class ScriptureIndexer {
             this.db.beginTransaction();
             if (cached) {
                 for (const key of cached.references) {
-                    const entry = this.data.references[key];
-                    if (entry) {
-                        const idx = entry.files.findIndex((f: { path: string }) => f.path === filePath);
-                        if (idx !== -1) {
-                            entry.files.splice(idx, 1);
-                            entry.totalOccurrences -= 1;
-                        }
-                        if (entry.files.length === 0) {
-                            delete this.data.references[key];
-                        }
-                    }
+                    // data.references only tracks existence/BCV; DB holds file links.
+                    // Keep the key if other files still reference it (DB is source of truth).
                 }
             }
             delete this.data.fileCache[filePath];

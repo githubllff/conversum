@@ -4614,16 +4614,7 @@ var ScriptureIndexer = class {
                 occ.endVerse,
                 occ.endChapter
               );
-              if (referenceMap.has(key)) {
-                const entry = referenceMap.get(key);
-                const existingFile = entry.files.find((f) => f.path === file.path);
-                if (existingFile) {
-                  existingFile.occurrences++;
-                } else {
-                  entry.files.push({ path: file.path, occurrences: 1 });
-                }
-                entry.totalOccurrences++;
-              } else {
+              if (!referenceMap.has(key)) {
                 referenceMap.set(key, {
                   startBcv: occ.startBcv,
                   endBcv: occ.endBcv,
@@ -4634,8 +4625,8 @@ var ScriptureIndexer = class {
                     endVerse: occ.endVerse,
                     endChapter: occ.endChapter
                   },
-                  files: [{ path: file.path, occurrences: 1 }],
-                  totalOccurrences: 1
+                  files: [],
+                  totalOccurrences: 0
                 });
                 this.progress.uniqueReferences++;
               }
@@ -4755,16 +4746,7 @@ var ScriptureIndexer = class {
             occ.endVerse,
             occ.endChapter
           );
-          if (this.data.references[key]) {
-            const entry = this.data.references[key];
-            const existingFile = entry.files.find((f) => f.path === file.path);
-            if (existingFile) {
-              existingFile.occurrences++;
-            } else {
-              entry.files.push({ path: file.path, occurrences: 1 });
-            }
-            entry.totalOccurrences++;
-          } else {
+          if (!this.data.references[key]) {
             this.data.references[key] = {
               startBcv: occ.startBcv,
               endBcv: occ.endBcv,
@@ -4775,8 +4757,8 @@ var ScriptureIndexer = class {
                 endVerse: occ.endVerse,
                 endChapter: occ.endChapter
               },
-              files: [{ path: file.path, occurrences: 1 }],
-              totalOccurrences: 1
+              files: [],
+              totalOccurrences: 0
             };
           }
         }
@@ -4817,17 +4799,6 @@ var ScriptureIndexer = class {
       this.db.beginTransaction();
       if (cached) {
         for (const key of cached.references) {
-          const entry = this.data.references[key];
-          if (entry) {
-            const idx = entry.files.findIndex((f) => f.path === filePath);
-            if (idx !== -1) {
-              entry.files.splice(idx, 1);
-              entry.totalOccurrences -= 1;
-            }
-            if (entry.files.length === 0) {
-              delete this.data.references[key];
-            }
-          }
         }
       }
       delete this.data.fileCache[filePath];
