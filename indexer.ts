@@ -467,7 +467,7 @@ export class ScriptureIndexer {
                     try {
                         await this.db.commitTransaction(false);
                         this.db.beginTransaction();
-                        await this.plugin.getLogger()?.log(`Progress: ${processedCount}/${filteredFiles.length} files (${this.progress.referencesFound} occurrences, ${uniqueRefs.size} unique refs) [${file.path}]`);
+                        await this.plugin.getLogger()?.log(`Progress: ${processedCount}/${filteredFiles.length} files (${this.progress.referencesFound} occurrences, ${referenceMap.size} unique refs) [${file.path}]`);
                     } catch (e) {
                         await this.plugin.getLogger()?.error(`Checkpoint commit failed at file ${file.path}`, e);
                     }
