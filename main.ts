@@ -37,6 +37,7 @@ export default class ConversumPlugin extends Plugin {
         await this.logger.log('Plugin initializing...');
 
         await this.loadSettings();
+        await this.logger.log('Settings loaded');
 
         try {
             await initEngine();
@@ -48,7 +49,9 @@ export default class ConversumPlugin extends Plugin {
         // Engines are created lazily to reduce baseline RAM on low-end devices.
 
         this.db = new IndexDatabase(this);
+        await this.logger.log('Initializing database...');
         await this.db.init();
+        await this.logger.log('Database initialized');
         this.initIndexer();
 
         this.registerView(VIEW_TYPE_CONVERSUM_CONCORDANCE, (leaf) => new ConcordanceView(leaf, this));
@@ -63,7 +66,9 @@ export default class ConversumPlugin extends Plugin {
             this.openConcordanceView();
         });
 
+        await this.logger.log('Handling startup...');
         await this.handleStartup();
+        await this.logger.log('Startup handled');
 
         if (this.settings.autoIndex) {
             this.startFileWatcher();

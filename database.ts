@@ -25,49 +25,69 @@ function getConversumDeviceId(): string {
 
 async function compressGzip(data: Uint8Array): Promise<Uint8Array> {
     if (typeof CompressionStream === 'undefined') return data;
-    const stream = new CompressionStream('gzip');
-    const writer = stream.writable.getWriter();
-    await writer.write(data);
-    await writer.close();
-    const reader = stream.readable.getReader();
-    const chunks: Uint8Array[] = [];
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) chunks.push(value);
+    const compressPromise = (async () => {
+        const stream = new CompressionStream('gzip');
+        const writer = stream.writable.getWriter();
+        await writer.write(data);
+        await writer.close();
+        const reader = stream.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) chunks.push(value);
+        }
+        const total = chunks.reduce((n, c) => n + c.length, 0);
+        const out = new Uint8Array(total);
+        let off = 0;
+        for (const c of chunks) {
+            out.set(c, off);
+            off += c.length;
+        }
+        return out;
+    })();
+    const timeoutPromise = new Promise<Uint8Array>((resolve) => {
+        window.setTimeout(() => resolve(data), 3000);
+    });
+    try {
+        return await Promise.race([compressPromise, timeoutPromise]);
+    } catch {
+        return data;
     }
-    const total = chunks.reduce((n, c) => n + c.length, 0);
-    const out = new Uint8Array(total);
-    let off = 0;
-    for (const c of chunks) {
-        out.set(c, off);
-        off += c.length;
-    }
-    return out;
 }
 
 async function decompressGzip(data: Uint8Array): Promise<Uint8Array> {
     if (data.length < 2 || data[0] !== 0x1f || data[1] !== 0x8b) return data;
     if (typeof DecompressionStream === 'undefined') return data;
-    const stream = new DecompressionStream('gzip');
-    const writer = stream.writable.getWriter();
-    await writer.write(data);
-    await writer.close();
-    const reader = stream.readable.getReader();
-    const chunks: Uint8Array[] = [];
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) chunks.push(value);
+    const decompressPromise = (async () => {
+        const stream = new DecompressionStream('gzip');
+        const writer = stream.writable.getWriter();
+        await writer.write(data);
+        await writer.close();
+        const reader = stream.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) chunks.push(value);
+        }
+        const total = chunks.reduce((n, c) => n + c.length, 0);
+        const out = new Uint8Array(total);
+        let off = 0;
+        for (const c of chunks) {
+            out.set(c, off);
+            off += c.length;
+        }
+        return out;
+    })();
+    const timeoutPromise = new Promise<Uint8Array>((resolve) => {
+        window.setTimeout(() => resolve(data), 3000);
+    });
+    try {
+        return await Promise.race([decompressPromise, timeoutPromise]);
+    } catch {
+        return data;
     }
-    const total = chunks.reduce((n, c) => n + c.length, 0);
-    const out = new Uint8Array(total);
-    let off = 0;
-    for (const c of chunks) {
-        out.set(c, off);
-        off += c.length;
-    }
-    return out;
 }
 
 const DB_NAME = `conversum-index.${getConversumDeviceId()}.db`;

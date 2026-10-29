@@ -2781,48 +2781,68 @@ function getConversumDeviceId() {
 }
 async function compressGzip(data) {
   if (typeof CompressionStream === "undefined") return data;
-  const stream = new CompressionStream("gzip");
-  const writer = stream.writable.getWriter();
-  await writer.write(data);
-  await writer.close();
-  const reader = stream.readable.getReader();
-  const chunks = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) chunks.push(value);
+  const compressPromise = (async () => {
+    const stream = new CompressionStream("gzip");
+    const writer = stream.writable.getWriter();
+    await writer.write(data);
+    await writer.close();
+    const reader = stream.readable.getReader();
+    const chunks = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+    return out;
+  })();
+  const timeoutPromise = new Promise((resolve) => {
+    window.setTimeout(() => resolve(data), 3e3);
+  });
+  try {
+    return await Promise.race([compressPromise, timeoutPromise]);
+  } catch {
+    return data;
   }
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
 }
 async function decompressGzip(data) {
   if (data.length < 2 || data[0] !== 31 || data[1] !== 139) return data;
   if (typeof DecompressionStream === "undefined") return data;
-  const stream = new DecompressionStream("gzip");
-  const writer = stream.writable.getWriter();
-  await writer.write(data);
-  await writer.close();
-  const reader = stream.readable.getReader();
-  const chunks = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) chunks.push(value);
+  const decompressPromise = (async () => {
+    const stream = new DecompressionStream("gzip");
+    const writer = stream.writable.getWriter();
+    await writer.write(data);
+    await writer.close();
+    const reader = stream.readable.getReader();
+    const chunks = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+    return out;
+  })();
+  const timeoutPromise = new Promise((resolve) => {
+    window.setTimeout(() => resolve(data), 3e3);
+  });
+  try {
+    return await Promise.race([decompressPromise, timeoutPromise]);
+  } catch {
+    return data;
   }
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
 }
 var DB_NAME = `conversum-index.${getConversumDeviceId()}.db`;
 var IndexDatabase = class {
@@ -6314,6 +6334,7 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
     await this.logger.init();
     await this.logger.log("Plugin initializing...");
     await this.loadSettings();
+    await this.logger.log("Settings loaded");
     try {
       await initEngine();
       await this.logger.log("WASM Engine successfully initialized");
@@ -6322,7 +6343,9 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice("con[VER]sum: Failed to initialize engine.");
     }
     this.db = new IndexDatabase(this);
+    await this.logger.log("Initializing database...");
     await this.db.init();
+    await this.logger.log("Database initialized");
     this.initIndexer();
     this.registerView(VIEW_TYPE_CONVERSUM_CONCORDANCE, (leaf) => new ConcordanceView(leaf, this));
     this.relatedPopout = new RelatedNotesPopout(this);
@@ -6333,7 +6356,9 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
     this.addRibbonIcon("book-open", "con[VER]sum Concordance", () => {
       this.openConcordanceView();
     });
+    await this.logger.log("Handling startup...");
     await this.handleStartup();
+    await this.logger.log("Startup handled");
     if (this.settings.autoIndex) {
       this.startFileWatcher();
     }
