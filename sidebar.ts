@@ -431,22 +431,36 @@ export class ConcordanceView extends ItemView {
                         // instead of just opening the note at the top.
                         const needle = (ref.formattedText || displayText || '').trim();
                         let line = 0;
-                        if (needle) {
-                            try {
-                                const content = await this.app.vault.read(fileObj);
-                                const idx = content.indexOf(needle);
-                                if (idx >= 0) {
-                                    line = content.substring(0, idx).split('\\n').length - 1;
-                                } else {
-                                    // Fall back to a looser search on the first word
-                                    const firstWord = needle.split(/\\s+/)[0];
-                                    const idx2 = firstWord ? content.indexOf(firstWord) : -1;
-                                    if (idx2 >= 0) {
-                                        line = content.substring(0, idx2).split('\\n').length - 1;
+                        try {
+                            const content = await this.app.vault.read(fileObj);
+                            let idx = -1;
+                            if (needle) {
+                                idx = content.indexOf(needle);
+                            }
+                            if (idx < 0 && needle) {
+                                const firstWord = needle.split(/\\s+/)[0];
+                                if (firstWord && firstWord.length > 2) {
+                                    idx = content.indexOf(firstWord);
+                                }
+                            }
+                            if (idx < 0) {
+                                // Fall back to matching chapter:verse numbers, which is
+                                // robust against different book-name abbreviations.
+                                const startBcv = (ref.referenceKey || '').split('-')[0];
+                                const chapter = parseInt(startBcv.substring(2, 5), 10);
+                                const verse = parseInt(startBcv.substring(5, 8), 10);
+                                if (chapter > 0 && verse > 0) {
+                                    const re = new RegExp('\\\\b' + chapter + '\\\\s*[:.]\\\\s*' + verse + '\\\\b');
+                                    const m = content.match(re);
+                                    if (m && typeof m.index === 'number') {
+                                        idx = m.index;
                                     }
                                 }
-                            } catch {
                             }
+                            if (idx >= 0) {
+                                line = content.substring(0, idx).split('\\n').length - 1;
+                            }
+                        } catch {
                         }
                         const leaf = this.app.workspace.getLeaf(false);
                         await leaf.openFile(fileObj, { eState: { line } });
