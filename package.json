@@ -1,6 +1,6 @@
 {
   "name": "conversum",
-  "version": "2.4.14",
+  "version": "2.4.15",
   "description": "Turn scattered Bible references into a unified concordance. Automatically discovers, indexes, and links scriptures across all your notes.",
   "main": "main.js",
   "scripts": {
@@ -25,6 +25,7 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "sql.js": "^1.14.1"
   },
   "allowScripts": {

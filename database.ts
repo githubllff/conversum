@@ -3,6 +3,7 @@
 // @ts-ignore
 import { SQL_WASM_BASE64 } from './wasm-base64';
 import initSqlJs, { Database as SqlDatabase } from 'sql.js';
+import { gzipSync, gunzipSync } from 'fflate';
 import { isWholeBookReference } from './engine-wrapper';
 import type ConversumPlugin from './main';
 import { ConversumData, ReferenceIndexEntry, FileCacheEntry } from './types';
@@ -23,77 +24,21 @@ function getConversumDeviceId(): string {
     }
 }
 
-async function compressGzip(data: Uint8Array): Promise<Uint8Array> {
-    if (typeof CompressionStream === 'undefined') {
-        console.warn('con[VER]sum: CompressionStream not available');
-        return data;
-    }
-    const compressPromise = (async () => {
-        const stream = new CompressionStream('gzip');
-        const writer = stream.writable.getWriter();
-        await writer.write(data);
-        await writer.close();
-        const reader = stream.readable.getReader();
-        const chunks: Uint8Array[] = [];
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) chunks.push(value);
-        }
-        const total = chunks.reduce((n, c) => n + c.length, 0);
-        const out = new Uint8Array(total);
-        let off = 0;
-        for (const c of chunks) {
-            out.set(c, off);
-            off += c.length;
-        }
-        return out;
-    })();
-    const timeoutPromise = new Promise<Uint8Array>((resolve) => {
-        window.setTimeout(() => resolve(data), 10000);
-    });
+function compressGzip(data: Uint8Array): Uint8Array {
     try {
-        const result = await Promise.race([compressPromise, timeoutPromise]);
-        if (result === data) {
-            console.warn('con[VER]sum: Compression timed out or returned original');
-        }
-        return result;
+        return gzipSync(data);
     } catch (e) {
         console.warn('con[VER]sum: Compression failed', e);
         return data;
     }
 }
 
-async function decompressGzip(data: Uint8Array): Promise<Uint8Array> {
+function decompressGzip(data: Uint8Array): Uint8Array {
     if (data.length < 2 || data[0] !== 0x1f || data[1] !== 0x8b) return data;
-    if (typeof DecompressionStream === 'undefined') return data;
-    const decompressPromise = (async () => {
-        const stream = new DecompressionStream('gzip');
-        const writer = stream.writable.getWriter();
-        await writer.write(data);
-        await writer.close();
-        const reader = stream.readable.getReader();
-        const chunks: Uint8Array[] = [];
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) chunks.push(value);
-        }
-        const total = chunks.reduce((n, c) => n + c.length, 0);
-        const out = new Uint8Array(total);
-        let off = 0;
-        for (const c of chunks) {
-            out.set(c, off);
-            off += c.length;
-        }
-        return out;
-    })();
-    const timeoutPromise = new Promise<Uint8Array>((resolve) => {
-        window.setTimeout(() => resolve(data), 10000);
-    });
     try {
-        return await Promise.race([decompressPromise, timeoutPromise]);
-    } catch {
+        return gunzipSync(data);
+    } catch (e) {
+        console.warn('con[VER]sum: Decompression failed', e);
         return data;
     }
 }
