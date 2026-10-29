@@ -4645,7 +4645,7 @@ var ScriptureIndexer = class {
         onProgress?.(this.progress);
       }
       const newData = this.getEmptyData();
-      newData.references = Object.fromEntries(referenceMap);
+      newData.references = {};
       newData.fileCache = fileCache;
       newData.lastUpdated = Date.now();
       newData.version = this.pluginVersion;
@@ -4746,21 +4746,6 @@ var ScriptureIndexer = class {
             occ.endVerse,
             occ.endChapter
           );
-          if (!this.data.references[key]) {
-            this.data.references[key] = {
-              startBcv: occ.startBcv,
-              endBcv: occ.endBcv,
-              bcv: {
-                bookId: occ.bookId,
-                chapter: occ.chapter,
-                startVerse: occ.startVerse,
-                endVerse: occ.endVerse,
-                endChapter: occ.endChapter
-              },
-              files: [],
-              totalOccurrences: 0
-            };
-          }
         }
         this.data.fileCache[file.path] = {
           references: fileRefs,
@@ -5341,7 +5326,7 @@ var ConversumSettingTab = class extends import_obsidian3.PluginSettingTab {
     const statusEl = containerEl.createDiv({ cls: "conversum-status" });
     const data = this.plugin.indexer?.getData();
     const lastUpdated = data?.lastUpdated;
-    const refCount = data ? Object.keys(data.references).length : 0;
+    const refCount = this.plugin.getDatabase()?.getReferenceCount() || 0;
     if (lastUpdated && lastUpdated > 0) {
       const date = new Date(lastUpdated);
       statusEl.createEl("p", {
@@ -6403,8 +6388,7 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
         `Index looks incomplete (${dbOccurrenceCount} occurrences for ${dbFileCount} indexed files). Run "Rebuild index" to repair it.`
       );
     }
-    const data = this.db.getData();
-    const hasValidData = data && data.references && Object.keys(data.references).length > 0;
+    const hasValidData = dbRefCount > 0;
     const rebuildStatus = this.settings.rebuildStatus || "unknown";
     if (rebuildStatus === "in_progress" || rebuildStatus === "failed" || rebuildStatus === "aborted") {
       await this.logger?.warn(`Previous index rebuild state was '${rebuildStatus}'. Resetting state.`);

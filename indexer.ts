@@ -535,7 +535,8 @@ export class ScriptureIndexer {
             }
 
             const newData = this.getEmptyData();
-            newData.references = Object.fromEntries(referenceMap);
+            // Keep data.references empty to reduce RAM; SQLite is the source of truth.
+            newData.references = {};
             newData.fileCache = fileCache;
             newData.lastUpdated = Date.now();
             newData.version = this.pluginVersion;
@@ -644,21 +645,8 @@ export class ScriptureIndexer {
                         occ.endVerse,
                         occ.endChapter
                     );
-                    if (!this.data.references[key]) {
-                        this.data.references[key] = {
-                            startBcv: occ.startBcv,
-                            endBcv: occ.endBcv,
-                            bcv: {
-                                bookId: occ.bookId,
-                                chapter: occ.chapter,
-                                startVerse: occ.startVerse,
-                                endVerse: occ.endVerse,
-                                endChapter: occ.endChapter
-                            },
-                            files: [],
-                            totalOccurrences: 0
-                        };
-                    }
+                    // data.references is intentionally left empty to save RAM;
+                    // SQLite remains the source of truth.
                 }
                 this.data.fileCache[file.path] = {
                     references: fileRefs,

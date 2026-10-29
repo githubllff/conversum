@@ -128,10 +128,7 @@ export default class ConversumPlugin extends Plugin {
             );
         }
 
-        const data = this.db.getData();
-        const hasValidData = data && 
-            data.references && 
-            Object.keys(data.references).length > 0;
+        const hasValidData = dbRefCount > 0;
         const rebuildStatus = this.settings.rebuildStatus || 'unknown';
 
         if (rebuildStatus === 'in_progress' || rebuildStatus === 'failed' || rebuildStatus === 'aborted') {

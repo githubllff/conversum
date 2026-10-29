@@ -28,7 +28,7 @@ export class ConversumSettingTab extends PluginSettingTab {
         const statusEl = containerEl.createDiv({ cls: 'conversum-status' });
         const data = this.plugin.indexer?.getData();
         const lastUpdated = data?.lastUpdated;
-        const refCount = data ? Object.keys(data.references).length : 0;
+        const refCount = this.plugin.getDatabase()?.getReferenceCount() || 0;
         if (lastUpdated && lastUpdated > 0) {
             const date = new Date(lastUpdated);
             statusEl.createEl('p', {
