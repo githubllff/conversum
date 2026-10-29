@@ -7,7 +7,23 @@ import { isWholeBookReference } from './engine-wrapper';
 import type ConversumPlugin from './main';
 import { ConversumData, ReferenceIndexEntry, FileCacheEntry } from './types';
 
-const DB_NAME = 'conversum-index.db';
+function getConversumDeviceId(): string {
+    try {
+        const key = 'conversum-device-id';
+        let id = localStorage.getItem(key);
+        if (!id) {
+            id = (typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function')
+                ? (crypto as any).randomUUID()
+                : `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            localStorage.setItem(key, id);
+        }
+        return id.replace(/[^a-zA-Z0-9_-]/g, '');
+    } catch {
+        return 'default';
+    }
+}
+
+const DB_NAME = `conversum-index.${getConversumDeviceId()}.db`;
 
 export class IndexDatabase {
     private plugin: ConversumPlugin;
@@ -51,44 +67,72 @@ export class IndexDatabase {
         try {
             await ensureSql();
 
+            // Migrate a legacy shared database file to this device's own file so
+            // syncing the vault no longer causes cross-device corruption.
+            const legacyPath = `${dir}/conversum-index.db`;
+            if (dbPath !== legacyPath) {
+                try {
+                    if (!(await adapter.exists(dbPath)) && (await adapter.exists(legacyPath))) {
+                        await adapter.rename(legacyPath, dbPath);
+                        await this.plugin.getLogger()?.log('Migrated legacy database to per-device file');
+                    }
+                } catch (migrateErr) {
+                    await this.plugin.getLogger()?.warn('Legacy database migration failed', migrateErr);
+                }
+            }
+
             let dbData: Uint8Array | null = null;
             let loadedFromBackup = false;
 
-            try {
-                const fileExists = await adapter.exists(dbPath);
-                if (fileExists) {
-                    const fileContent = await adapter.readBinary(dbPath);
-                    const candidate = new Uint8Array(fileContent);
-                    try {
-                        const testDb = new this.SQL.Database(candidate);
-                        testDb.close();
-                        dbData = candidate;
-                    } catch (corruptErr) {
-                        console.warn('con[VER]sum: Primary database appears corrupt, attempting recovery', corruptErr);
+            // Retry briefly so a late-arriving synced database file can be picked
+            // up instead of triggering an unnecessary full rebuild.
+            for (let attempt = 0; attempt < 3 && !dbData; attempt++) {
+                if (attempt > 0) {
+                    await this.plugin.getLogger()?.log(`Waiting for database file (attempt ${attempt + 1}/3)...`);
+                    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+                }
+                try {
+                    const fileExists = await adapter.exists(dbPath);
+                    if (fileExists) {
+                        const fileContent = await adapter.readBinary(dbPath);
+                        const candidate = new Uint8Array(fileContent);
                         try {
-                            await adapter.rename(dbPath, `${dbPath}.corrupt.${Date.now()}`);
-                        } catch {
+                            const testDb = new this.SQL.Database(candidate);
+                            testDb.close();
+                            dbData = candidate;
+                        } catch (corruptErr) {
+                            console.warn('con[VER]sum: Primary database appears corrupt, attempting recovery', corruptErr);
+                            try {
+                                await adapter.rename(dbPath, `${dbPath}.corrupt.${Date.now()}`);
+                            } catch {
+                            }
+                            dbData = null;
                         }
+                    }
+                } catch {
+                }
+
+                if (!dbData) {
+                    try {
+                        const backupExists = await adapter.exists(backupPath);
+                        if (backupExists) {
+                            const fileContent = await adapter.readBinary(backupPath);
+                            const candidate = new Uint8Array(fileContent);
+                            const testDb = new this.SQL.Database(candidate);
+                            testDb.close();
+                            dbData = candidate;
+                            loadedFromBackup = true;
+                        }
+                    } catch {
                         dbData = null;
                     }
                 }
-            } catch {
             }
 
-            if (!dbData) {
-                try {
-                    const backupExists = await adapter.exists(backupPath);
-                    if (backupExists) {
-                        const fileContent = await adapter.readBinary(backupPath);
-                        const candidate = new Uint8Array(fileContent);
-                        const testDb = new this.SQL.Database(candidate);
-                        testDb.close();
-                        dbData = candidate;
-                        loadedFromBackup = true;
-                    }
-                } catch {
-                    dbData = null;
-                }
+            if (dbData) {
+                await this.plugin.getLogger()?.log(`Loaded database from ${loadedFromBackup ? 'backup' : 'primary'} file`);
+            } else {
+                await this.plugin.getLogger()?.log('No database file found; starting empty');
             }
 
             this.db = dbData ? new this.SQL.Database(dbData) : new this.SQL.Database();

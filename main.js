@@ -2760,7 +2760,20 @@ function getEngineVersion() {
 }
 
 // database.ts
-var DB_NAME = "conversum-index.db";
+function getConversumDeviceId() {
+  try {
+    const key = "conversum-device-id";
+    let id = localStorage.getItem(key);
+    if (!id) {
+      id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(key, id);
+    }
+    return id.replace(/[^a-zA-Z0-9_-]/g, "");
+  } catch {
+    return "default";
+  }
+}
+var DB_NAME = `conversum-index.${getConversumDeviceId()}.db`;
 var IndexDatabase = class {
   constructor(plugin) {
     this.db = null;
@@ -2796,42 +2809,64 @@ var IndexDatabase = class {
     };
     try {
       await ensureSql();
+      const legacyPath = `${dir}/conversum-index.db`;
+      if (dbPath !== legacyPath) {
+        try {
+          if (!await adapter.exists(dbPath) && await adapter.exists(legacyPath)) {
+            await adapter.rename(legacyPath, dbPath);
+            await this.plugin.getLogger()?.log("Migrated legacy database to per-device file");
+          }
+        } catch (migrateErr) {
+          await this.plugin.getLogger()?.warn("Legacy database migration failed", migrateErr);
+        }
+      }
       let dbData = null;
       let loadedFromBackup = false;
-      try {
-        const fileExists = await adapter.exists(dbPath);
-        if (fileExists) {
-          const fileContent = await adapter.readBinary(dbPath);
-          const candidate = new Uint8Array(fileContent);
-          try {
-            const testDb = new this.SQL.Database(candidate);
-            testDb.close();
-            dbData = candidate;
-          } catch (corruptErr) {
-            console.warn("con[VER]sum: Primary database appears corrupt, attempting recovery", corruptErr);
+      for (let attempt = 0; attempt < 3 && !dbData; attempt++) {
+        if (attempt > 0) {
+          await this.plugin.getLogger()?.log(`Waiting for database file (attempt ${attempt + 1}/3)...`);
+          await new Promise((resolve) => window.setTimeout(resolve, 2e3));
+        }
+        try {
+          const fileExists = await adapter.exists(dbPath);
+          if (fileExists) {
+            const fileContent = await adapter.readBinary(dbPath);
+            const candidate = new Uint8Array(fileContent);
             try {
-              await adapter.rename(dbPath, `${dbPath}.corrupt.${Date.now()}`);
-            } catch {
+              const testDb = new this.SQL.Database(candidate);
+              testDb.close();
+              dbData = candidate;
+            } catch (corruptErr) {
+              console.warn("con[VER]sum: Primary database appears corrupt, attempting recovery", corruptErr);
+              try {
+                await adapter.rename(dbPath, `${dbPath}.corrupt.${Date.now()}`);
+              } catch {
+              }
+              dbData = null;
             }
+          }
+        } catch {
+        }
+        if (!dbData) {
+          try {
+            const backupExists = await adapter.exists(backupPath);
+            if (backupExists) {
+              const fileContent = await adapter.readBinary(backupPath);
+              const candidate = new Uint8Array(fileContent);
+              const testDb = new this.SQL.Database(candidate);
+              testDb.close();
+              dbData = candidate;
+              loadedFromBackup = true;
+            }
+          } catch {
             dbData = null;
           }
         }
-      } catch {
       }
-      if (!dbData) {
-        try {
-          const backupExists = await adapter.exists(backupPath);
-          if (backupExists) {
-            const fileContent = await adapter.readBinary(backupPath);
-            const candidate = new Uint8Array(fileContent);
-            const testDb = new this.SQL.Database(candidate);
-            testDb.close();
-            dbData = candidate;
-            loadedFromBackup = true;
-          }
-        } catch {
-          dbData = null;
-        }
+      if (dbData) {
+        await this.plugin.getLogger()?.log(`Loaded database from ${loadedFromBackup ? "backup" : "primary"} file`);
+      } else {
+        await this.plugin.getLogger()?.log("No database file found; starting empty");
       }
       this.db = dbData ? new this.SQL.Database(dbData) : new this.SQL.Database();
       this.db.run("PRAGMA foreign_keys = ON;");
@@ -6493,6 +6528,24 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
       this.indexer.abort();
       this.logger?.log("Index rebuild stop requested by user");
     });
+    const loadBtn = notice.messageEl.createEl("button", { text: "Load from vault" });
+    loadBtn.style.marginLeft = "10px";
+    loadBtn.style.cursor = "pointer";
+    loadBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      loadBtn.disabled = true;
+      loadBtn.textContent = "Loading...";
+      try {
+        this.indexer?.abort();
+        await new Promise((resolve) => window.setTimeout(resolve, 300));
+        this.forceResetBusyState();
+        await this.importDatabaseFromVault();
+        notice.hide();
+      } catch (err) {
+        await this.logger?.error("Load from vault failed", err);
+      }
+    });
     try {
       const progressCallback = (progress) => {
         const percent = progress.totalFiles > 0 ? Math.round(progress.processedFiles / progress.totalFiles * 100) : 0;
@@ -6500,6 +6553,9 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
         notice.setMessage(`Indexing: ${percent}% (${progress.processedFiles}/${progress.totalFiles} files${fileInfo}, ${progress.uniqueReferences} unique refs)`);
         if (!stopBtn.isConnected) {
           notice.messageEl.appendChild(stopBtn);
+        }
+        if (!loadBtn.isConnected) {
+          notice.messageEl.appendChild(loadBtn);
         }
       };
       await this.indexer.rebuildIndex(progressCallback);
@@ -6534,6 +6590,23 @@ var ConversumPlugin = class extends import_obsidian5.Plugin {
     this.indexer?.forceResetBusyState();
     this.clearPendingIndexUpdates();
     new import_obsidian5.Notice("Busy state reset.");
+  }
+  async importDatabaseFromVault() {
+    const path = "conversum-index.db";
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(path)) {
+      new import_obsidian5.Notice("No conversum-index.db found at vault root.");
+      return;
+    }
+    try {
+      const bytes = await adapter.readBinary(path);
+      await this.importDatabase(bytes);
+      new import_obsidian5.Notice("Imported index from vault.");
+    } catch (e) {
+      await this.logger?.error("Import from vault failed", e);
+      const message = e instanceof Error ? e.message : String(e);
+      new import_obsidian5.Notice(`Import failed: ${message}`, 1e4);
+    }
   }
   clearPendingIndexUpdates() {
     this.pendingFiles.clear();

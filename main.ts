@@ -347,6 +347,25 @@ export default class ConversumPlugin extends Plugin {
             this.logger?.log('Index rebuild stop requested by user');
         });
 
+        const loadBtn = notice.messageEl.createEl('button', { text: 'Load from vault' });
+        loadBtn.style.marginLeft = '10px';
+        loadBtn.style.cursor = 'pointer';
+        loadBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            loadBtn.disabled = true;
+            loadBtn.textContent = 'Loading...';
+            try {
+                this.indexer?.abort();
+                await new Promise((resolve) => window.setTimeout(resolve, 300));
+                this.forceResetBusyState();
+                await this.importDatabaseFromVault();
+                notice.hide();
+            } catch (err) {
+                await this.logger?.error('Load from vault failed', err);
+            }
+        });
+
         try {
             const progressCallback = (progress: IndexProgress) => {
                 const percent = progress.totalFiles > 0 
@@ -354,9 +373,12 @@ export default class ConversumPlugin extends Plugin {
                     : 0;
                 const fileInfo = progress.currentFile ? ` (${progress.currentFile})` : '';
                 notice.setMessage(`Indexing: ${percent}% (${progress.processedFiles}/${progress.totalFiles} files${fileInfo}, ${progress.uniqueReferences} unique refs)`);
-                // Re-append the button after setMessage replaces the content
+                // Re-append the buttons after setMessage replaces the content
                 if (!stopBtn.isConnected) {
                     notice.messageEl.appendChild(stopBtn);
+                }
+                if (!loadBtn.isConnected) {
+                    notice.messageEl.appendChild(loadBtn);
                 }
             };
 
@@ -395,6 +417,24 @@ export default class ConversumPlugin extends Plugin {
         this.indexer?.forceResetBusyState();
         this.clearPendingIndexUpdates();
         new Notice('Busy state reset.');
+    }
+
+    public async importDatabaseFromVault(): Promise<void> {
+        const path = 'conversum-index.db';
+        const adapter = this.app.vault.adapter;
+        if (!(await adapter.exists(path))) {
+            new Notice('No conversum-index.db found at vault root.');
+            return;
+        }
+        try {
+            const bytes = await adapter.readBinary(path);
+            await this.importDatabase(bytes);
+            new Notice('Imported index from vault.');
+        } catch (e) {
+            await this.logger?.error('Import from vault failed', e);
+            const message = e instanceof Error ? e.message : String(e);
+            new Notice(`Import failed: ${message}`, 10000);
+        }
     }
 
     public clearPendingIndexUpdates(): void {
