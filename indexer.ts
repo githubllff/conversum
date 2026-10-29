@@ -1,6 +1,6 @@
 // indexer.ts
 
-import { Notice, type Vault, type TFile } from 'obsidian';
+import type { Vault, TFile } from 'obsidian';
 import { IndexDatabase } from './database';
 import { parseReferences, isEngineReady, decodeScriptures, resolveLanguage } from './engine-wrapper';
 import type ConversumPlugin from './main';
@@ -35,7 +35,6 @@ export class ScriptureIndexer {
     private abortRequested = false;
     private isFormatting = false;
     private formattingAbortRequested = false;
-    private formattingNotice: Notice | null = null;
     private formattingTimeout: number | null = null;
     private formattingBatchSize = 100;
     private formattingDelayMs = 150;
@@ -276,11 +275,6 @@ export class ScriptureIndexer {
             this.formattingTimeout = null;
         }
         this.isFormatting = false;
-        if (this.formattingNotice) {
-            this.formattingNotice.setMessage('Formatting stopped.');
-            window.setTimeout(() => this.formattingNotice?.hide(), 1500);
-            this.formattingNotice = null;
-        }
         this.plugin.refreshSettings();
     }
 
@@ -307,20 +301,6 @@ export class ScriptureIndexer {
         this.formattingAbortRequested = false;
         this.plugin.refreshSettings();
 
-        const remaining = this.db.getUnformattedCount();
-        const notice = new Notice(`Formatting references... (${remaining} remaining)`, 4000);
-        this.formattingNotice = notice;
-        const stopBtn = notice.messageEl.createEl('button', { text: 'Stop formatting' });
-        stopBtn.style.marginLeft = '10px';
-        stopBtn.style.cursor = 'pointer';
-        stopBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            stopBtn.disabled = true;
-            stopBtn.textContent = 'Stopping...';
-            this.abortFormatting();
-        });
-
         this.formattingTimeout = window.setTimeout(() => {
             this.formatBatch();
         }, 100);
@@ -329,22 +309,12 @@ export class ScriptureIndexer {
     private async formatBatch(): Promise<void> {
         if (this.formattingAbortRequested) {
             this.isFormatting = false;
-            if (this.formattingNotice) {
-                this.formattingNotice.setMessage('Formatting stopped.');
-                window.setTimeout(() => this.formattingNotice?.hide(), 1500);
-                this.formattingNotice = null;
-            }
             this.plugin.refreshSettings();
             return;
         }
         const rangeKeys = this.db.getUnformattedRangeKeys(this.formattingBatchSize);
         if (rangeKeys.length === 0) {
             this.isFormatting = false;
-            if (this.formattingNotice) {
-                this.formattingNotice.setMessage('Formatting complete.');
-                window.setTimeout(() => this.formattingNotice?.hide(), 1500);
-                this.formattingNotice = null;
-            }
             await this.db.vacuum();
             await this.db.saveToDisk();
             await this.plugin.getLogger()?.log('Formatting completed and compacted to disk');
@@ -379,11 +349,6 @@ export class ScriptureIndexer {
             } else {
                 this.db.rollbackTransaction();
                 this.isFormatting = false;
-                if (this.formattingNotice) {
-                    this.formattingNotice.setMessage('Formatting stopped.');
-                    window.setTimeout(() => this.formattingNotice?.hide(), 1500);
-                    this.formattingNotice = null;
-                }
                 this.plugin.refreshSettings();
                 return;
             }
@@ -398,11 +363,6 @@ export class ScriptureIndexer {
         } catch (e) {
             this.db.rollbackTransaction();
             this.isFormatting = false;
-            if (this.formattingNotice) {
-                this.formattingNotice.setMessage('Formatting failed.');
-                window.setTimeout(() => this.formattingNotice?.hide(), 2000);
-                this.formattingNotice = null;
-            }
             void this.plugin.getLogger()?.error('formatBatch transaction failed', e);
             this.plugin.refreshSettings();
         }
@@ -760,10 +720,6 @@ export class ScriptureIndexer {
         if (this.formattingTimeout) {
             clearTimeout(this.formattingTimeout);
             this.formattingTimeout = null;
-        }
-        if (this.formattingNotice) {
-            try { this.formattingNotice.hide(); } catch { }
-            this.formattingNotice = null;
         }
         this.plugin.refreshSettings();
     }
