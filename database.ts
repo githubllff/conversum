@@ -24,7 +24,10 @@ function getConversumDeviceId(): string {
 }
 
 async function compressGzip(data: Uint8Array): Promise<Uint8Array> {
-    if (typeof CompressionStream === 'undefined') return data;
+    if (typeof CompressionStream === 'undefined') {
+        console.warn('con[VER]sum: CompressionStream not available');
+        return data;
+    }
     const compressPromise = (async () => {
         const stream = new CompressionStream('gzip');
         const writer = stream.writable.getWriter();
@@ -50,8 +53,13 @@ async function compressGzip(data: Uint8Array): Promise<Uint8Array> {
         window.setTimeout(() => resolve(data), 10000);
     });
     try {
-        return await Promise.race([compressPromise, timeoutPromise]);
-    } catch {
+        const result = await Promise.race([compressPromise, timeoutPromise]);
+        if (result === data) {
+            console.warn('con[VER]sum: Compression timed out or returned original');
+        }
+        return result;
+    } catch (e) {
+        console.warn('con[VER]sum: Compression failed', e);
         return data;
     }
 }
